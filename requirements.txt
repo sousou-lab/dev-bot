@@ -1,0 +1,6 @@
+discord.py
+PyGithub
+python-dotenv
+PyYAML
+aiofiles
+claude-agent-sdk

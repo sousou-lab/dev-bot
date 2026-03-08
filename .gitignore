@@ -1,0 +1,9 @@
+.venv/
+venv/
+node_modules/
+.env
+__pycache__/
+app/__pycache__/
+*.pyc
+runs/*
+!runs/.gitkeep
