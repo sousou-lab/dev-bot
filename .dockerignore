@@ -1,0 +1,14 @@
+.git
+.venv
+node_modules
+runs/
+__pycache__
+*.pyc
+.env
+.env.*
+!.env.example
+tests/
+docs/
+*.md
+!WORKFLOW.md
+!AGENTS.md

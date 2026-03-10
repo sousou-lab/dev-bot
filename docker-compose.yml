@@ -1,0 +1,20 @@
+services:
+  dev-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - STATE_DIR=/var/lib/dev-bot/runs
+      - WORKSPACE_ROOT=/var/lib/dev-bot/workspaces
+      - LOG_FORMAT=json
+      - HEALTH_CHECK_PORT=8080
+    volumes:
+      - bot-runs:/var/lib/dev-bot/runs
+      - bot-workspaces:/var/lib/dev-bot/workspaces
+    ports:
+      - "${HEALTH_CHECK_PORT:-8080}:8080"
+    stop_grace_period: 30s
+
+volumes:
+  bot-runs:
+  bot-workspaces:
