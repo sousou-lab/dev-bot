@@ -148,6 +148,7 @@ class RequirementsAgent:
         client = ClaudeAgentClient(
             api_key=self.settings.anthropic_api_key,
             timeout_seconds=timeout_seconds,
+            max_buffer_size=self.settings.claude_agent_max_buffer_size,
         )
         turn_count = sum(1 for row in messages if row.get("role") == "user")
         conversation = "\n".join(

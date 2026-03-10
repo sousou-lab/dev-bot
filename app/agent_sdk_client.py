@@ -124,6 +124,27 @@ class AgentOversizedReadError(RuntimeError):
         self.max_tokens = max_tokens
 
 
+class AgentBufferOverflowError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stderr: list[str] | None = None,
+        session_id: str | None = None,
+        prompt_kind: str | None = None,
+        max_buffer_size: int = 0,
+        likely_source: str = "",
+        source_detail: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.stderr = stderr or []
+        self.session_id = session_id
+        self.prompt_kind = prompt_kind
+        self.max_buffer_size = max_buffer_size
+        self.likely_source = likely_source
+        self.source_detail = source_detail
+
+
 class AgentContextOverloadError(RuntimeError):
     def __init__(
         self,
@@ -144,9 +165,15 @@ class AgentContextOverloadError(RuntimeError):
 
 
 class ClaudeAgentClient:
-    def __init__(self, api_key: str | None = None, timeout_seconds: float | None = 90) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        timeout_seconds: float | None = 90,
+        max_buffer_size: int | None = None,
+    ) -> None:
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.max_buffer_size = max_buffer_size
 
     def json_response(
         self,
@@ -428,6 +455,7 @@ class ClaudeAgentClient:
                 cwd,
                 max_turns,
                 self.timeout_seconds,
+                self.max_buffer_size,
                 allowed_tools,
                 permission_mode,
                 setting_sources,
@@ -468,6 +496,7 @@ async def _query_text(
     cwd: str | None,
     max_turns: int,
     timeout_seconds: float | None,
+    max_buffer_size: int | None,
     allowed_tools: list[str] | None,
     permission_mode: str | None,
     setting_sources: list[str] | None,
@@ -488,6 +517,7 @@ async def _query_text(
         system=system,
         cwd=cwd,
         max_turns=max_turns,
+        max_buffer_size=max_buffer_size,
         allowed_tools=allowed_tools,
         permission_mode=permission_mode,
         setting_sources=setting_sources,
@@ -524,6 +554,24 @@ async def _query_text(
             return await _collect_result()
         return await asyncio.wait_for(_collect_result(), timeout=timeout_seconds)
     except RuntimeError as exc:
+        overflow = _extract_buffer_overflow_error(str(exc), stderr_lines, max_buffer_size=max_buffer_size)
+        if overflow is not None:
+            observed_max_buffer, likely_source, source_detail = overflow
+            message = "Claude Agent SDK exceeded the maximum JSON message buffer before returning a final result."
+            if likely_source:
+                message = f"{message} likely_source={likely_source}"
+            if source_detail:
+                message = f"{message} evidence={source_detail}"
+            if observed_max_buffer:
+                message = f"{message} max_buffer_size={observed_max_buffer}"
+            raise AgentBufferOverflowError(
+                message,
+                stderr=stderr_lines,
+                prompt_kind=prompt_kind,
+                max_buffer_size=observed_max_buffer,
+                likely_source=likely_source,
+                source_detail=source_detail,
+            ) from exc
         usage_limit_message = _extract_usage_limit_message(str(exc))
         if usage_limit_message is not None:
             raise AgentRateLimitError(
@@ -577,6 +625,7 @@ async def _persistent_json_responses(
         system=system,
         cwd=cwd,
         max_turns=max_turns,
+        max_buffer_size=None,
         allowed_tools=allowed_tools,
         permission_mode=permission_mode,
         setting_sources=setting_sources,
@@ -722,12 +771,43 @@ def _extract_context_overload_error(stderr_lines: list[str]) -> tuple[str, int] 
     return None
 
 
+def _extract_buffer_overflow_error(
+    message: str,
+    stderr_lines: list[str],
+    *,
+    max_buffer_size: int | None,
+) -> tuple[int, str, str] | None:
+    if "JSON message exceeded maximum buffer size" not in message:
+        return None
+
+    observed_max_buffer = max_buffer_size or 0
+    match = re.search(r"maximum buffer size of (?P<bytes>\d+) bytes", message)
+    if match:
+        observed_max_buffer = int(match.group("bytes"))
+
+    for line in reversed(stderr_lines):
+        tool_match = re.search(r"executePreToolHooks called for tool: (?P<tool>[A-Za-z0-9_-]+)", line)
+        if tool_match:
+            return observed_max_buffer, "tool_output", f"last_tool={tool_match.group('tool')}"
+        if "Sending " in line and " skills via attachment" in line:
+            attach_match = re.search(r"Sending (?P<count>\d+) skills via attachment", line)
+            detail = f"attachments={attach_match.group('count')}" if attach_match else "skills_attachment"
+            return observed_max_buffer, "initial_attachments", detail
+        if "Stream started - received first chunk" in line:
+            return observed_max_buffer, "assistant_output", "stream_started"
+        if "image" in line.lower():
+            return observed_max_buffer, "input_image", "image_reference"
+
+    return observed_max_buffer, "unknown", ""
+
+
 def _build_options(
     *,
     api_key: str | None,
     system: str | dict[str, Any],
     cwd: str | None,
     max_turns: int,
+    max_buffer_size: int | None,
     allowed_tools: list[str] | None,
     permission_mode: str | None,
     setting_sources: list[str] | None,
@@ -776,6 +856,7 @@ def _build_options(
         cli_path=cli_path,
         env=env,
         extra_args={"debug-to-stderr": None},
+        max_buffer_size=max_buffer_size,
         stderr=stderr_lines.append,
         hooks=hooks,
         agents=agents,

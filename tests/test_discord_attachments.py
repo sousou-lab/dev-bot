@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from app.state_store import FileStateStore
 
@@ -46,7 +47,10 @@ class DiscordAttachmentTests(unittest.IsolatedAsyncioTestCase):
             max_implementation_iterations=5,
             max_concurrent_runs=5,
             codex_bin="codex",
+            codex_app_server_command="codex app-server",
+            codex_model="gpt-5-codex",
             approval_timeout_seconds=900,
+            claude_agent_max_buffer_size=5 * 1024 * 1024,
         )
         self.state_store = FileStateStore(self.tempdir.name)
         self.state_store.create_run(thread_id=100, parent_message_id=200, channel_id=300)
@@ -85,6 +89,28 @@ class DiscordAttachmentTests(unittest.IsolatedAsyncioTestCase):
         parsed = await self.client._parse_message_inputs(message)
 
         self.assertIn("2MB", parsed["error"])
+
+    async def test_enqueue_run_for_thread_creates_issue_and_queues_run(self) -> None:
+        self.state_store.write_artifact(100, "requirement_summary.json", {"goal": "Ship feature"})
+        self.state_store.write_artifact(100, "plan.json", {"implementation_steps": ["step1"]})
+        self.state_store.write_artifact(100, "test_plan.json", {"cases": [{"id": "TC-1"}]})
+        self.client.github_client.create_issue = Mock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                repo_full_name="owner/repo",
+                number=12,
+                title="Issue title",
+                body="Issue body",
+                url="https://example.test/issues/12",
+            )
+        )
+        self.client.orchestrator.enqueue = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        issue = await self.client._enqueue_run_for_thread(thread_id=100, channel=None, repo_full_name="owner/repo")
+
+        self.assertEqual(12, issue["number"])
+        saved_issue = self.state_store.load_artifact(100, "issue.json")
+        self.assertEqual(12, saved_issue["number"])
+        self.client.orchestrator.enqueue.assert_awaited_once()
 
 
 @unittest.skipIf(_json_safe_value is None, "discord.py is not installed in the current interpreter")

@@ -13,6 +13,7 @@ class RunMeta:
     thread_id: str
     parent_message_id: str
     channel_id: str
+    issue_key: str
     created_at: str
     status: str
     current_run_id: str = ""
@@ -24,13 +25,14 @@ class FileStateStore:
         self.runs_root = Path(runs_root)
         self.runs_root.mkdir(parents=True, exist_ok=True)
 
-    def create_run(self, thread_id: int, parent_message_id: int, channel_id: int) -> RunMeta:
+    def create_run(self, thread_id: int, parent_message_id: int, channel_id: int, issue_key: str = "") -> RunMeta:
         run_dir = self.thread_dir(thread_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         meta = RunMeta(
             thread_id=str(thread_id),
             parent_message_id=str(parent_message_id),
             channel_id=str(channel_id),
+            issue_key=issue_key,
             created_at=datetime.now(UTC).isoformat(),
             status="draft",
         )
@@ -130,6 +132,11 @@ class FileStateStore:
 
     def has_run(self, thread_id: int) -> bool:
         return (self.thread_dir(thread_id) / "meta.json").exists()
+
+    def bind_issue(self, thread_id: int, repo_full_name: str, issue_number: int) -> str:
+        issue_key = f"{repo_full_name}#{issue_number}"
+        self.update_meta(thread_id, issue_key=issue_key, github_repo=repo_full_name, issue_number=str(issue_number))
+        return issue_key
 
     def list_runs_by_status(self, statuses: set[str]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

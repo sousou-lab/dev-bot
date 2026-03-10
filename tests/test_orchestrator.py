@@ -64,3 +64,14 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         failure = self.state_store.load_artifact(1, "last_failure.json")
         self.assertEqual("run_execution", failure["stage"])
         self.assertIn("boom-1", failure["message"])
+
+    async def test_enqueue_rejects_duplicate_workspace_key(self) -> None:
+        first = await self.orchestrator.enqueue(
+            WorkItem(thread_id=1, repo_full_name="owner/repo", issue={"number": 1}, workspace_key="owner/repo#1")
+        )
+        second = await self.orchestrator.enqueue(
+            WorkItem(thread_id=2, repo_full_name="owner/repo", issue={"number": 1}, workspace_key="owner/repo#1")
+        )
+
+        self.assertTrue(first)
+        self.assertFalse(second)

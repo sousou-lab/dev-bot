@@ -262,10 +262,12 @@ class PlanningAgent:
         client = ClaudeAgentClient(
             api_key=self.settings.anthropic_api_key,
             timeout_seconds=float(300),
+            max_buffer_size=self.settings.claude_agent_max_buffer_size,
         )
         test_plan_client = ClaudeAgentClient(
             api_key=self.settings.anthropic_api_key,
             timeout_seconds=float(600),
+            max_buffer_size=self.settings.claude_agent_max_buffer_size,
         )
         repo_context = _build_repo_context(workspace, repo_profile)
         common_prompt = (

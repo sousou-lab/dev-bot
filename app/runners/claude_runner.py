@@ -34,8 +34,8 @@ REVIEW_SCHEMA: dict[str, Any] = {
 
 
 class ClaudeRunner:
-    def __init__(self, api_key: str | None) -> None:
-        self.client = ClaudeAgentClient(api_key=api_key, timeout_seconds=180)
+    def __init__(self, api_key: str | None, *, max_buffer_size: int | None = None) -> None:
+        self.client = ClaudeAgentClient(api_key=api_key, timeout_seconds=180, max_buffer_size=max_buffer_size)
 
     def verify(
         self,
