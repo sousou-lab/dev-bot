@@ -2,26 +2,29 @@ from __future__ import annotations
 
 from app.config import ValidationError, load_settings, validate_settings
 from app.github_client import GitHubIssueClient
+from app.logging_setup import configure_logging, get_logger
+
+logger = get_logger(__name__)
 
 
 def main() -> int:
+    configure_logging()
+
     try:
         settings = load_settings()
     except ValidationError as exc:
-        print(f"Invalid configuration: {exc}")
+        logger.error("Invalid configuration: %s", exc)
         return 1
 
     missing = validate_settings(settings)
     if missing:
-        print("Missing environment variables:")
-        for key in missing:
-            print(f"- {key}")
+        logger.error("Missing environment variables: %s", ", ".join(missing))
         return 1
 
     try:
         settings.ensure_runtime_paths()
     except RuntimeError as exc:
-        print(f"Configuration check failed: {exc}")
+        logger.error("Configuration check failed: %s", exc)
         return 1
 
     github_preflight = GitHubIssueClient(
@@ -34,23 +37,23 @@ def main() -> int:
         project_state_option_ids=getattr(settings, "github_project_state_option_ids", ""),
     ).preflight()
     if github_preflight.get("ok"):
-        print(
-            "GitHub preflight OK:"
-            f" repo_count={github_preflight.get('repo_count', 0)}"
-            f" sample={github_preflight.get('sample_repos', [])}"
+        logger.info(
+            "GitHub preflight OK: repo_count=%s sample=%s",
+            github_preflight.get("repo_count", 0),
+            github_preflight.get("sample_repos", []),
         )
     else:
-        print(
-            "GitHub preflight warning:"
-            f" error={github_preflight.get('error', 'unknown')}"
-            f" fallback={github_preflight.get('fallback_repos', [])}"
+        logger.warning(
+            "GitHub preflight warning: error=%s fallback=%s",
+            github_preflight.get("error", "unknown"),
+            github_preflight.get("fallback_repos", []),
         )
 
     try:
         from app.discord_adapter import build_client
     except ModuleNotFoundError as exc:
         if exc.name == "discord":
-            print("Discord dependency is not installed. Install runtime dependencies before starting the bot.")
+            logger.error("Discord dependency is not installed. Install runtime dependencies before starting the bot.")
             return 1
         raise
 
@@ -58,7 +61,7 @@ def main() -> int:
         client = build_client(settings)
     except RuntimeError as exc:
         if "discord.py is not installed" in str(exc):
-            print("Discord dependency is not installed. Install runtime dependencies before starting the bot.")
+            logger.error("Discord dependency is not installed. Install runtime dependencies before starting the bot.")
             return 1
         raise
     client.run(settings.discord_bot_token)

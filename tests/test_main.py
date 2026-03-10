@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib
-import io
+import logging
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -33,9 +33,9 @@ class MainModuleTests(unittest.TestCase):
             patch.object(
                 module.GitHubIssueClient, "preflight", return_value={"ok": True, "repo_count": 0, "sample_repos": []}
             ),
-            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            self.assertLogs("app.main", level=logging.ERROR) as cm,
         ):
             result = module.main()
 
         self.assertEqual(1, result)
-        self.assertIn("Discord dependency is not installed", stdout.getvalue())
+        self.assertTrue(any("Discord dependency is not installed" in msg for msg in cm.output))

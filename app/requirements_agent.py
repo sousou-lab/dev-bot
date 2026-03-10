@@ -8,6 +8,10 @@ from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
+
+from app.logging_setup import get_logger
+
+logger = get_logger(__name__)
 from urllib.request import Request, urlopen
 
 from app.agent_sdk_client import ClaudeAgentClient
@@ -106,7 +110,7 @@ class RequirementsAgent:
                 artifacts = {"summary": payload["summary"]}
             return RequirementReply(body=body, status=mapped_status, artifacts=artifacts)
         except Exception as exc:
-            print(f"RequirementsAgent fallback: {exc}")
+            logger.warning("RequirementsAgent fallback: %s", exc)
             debug_artifacts = {
                 "agent_error": {
                     "message": str(exc),

@@ -5,6 +5,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from app.logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 try:
     import discord
     from discord import app_commands
@@ -262,7 +266,7 @@ class DevBotClient(discord.Client):
 
     async def on_ready(self) -> None:
         if self.user is not None:
-            print(f"Logged in as {self.user} ({self.user.id})")
+            logger.info("Logged in as %s (%s)", self.user, self.user.id)
         self.add_view(self.build_approval_view())
         asyncio.create_task(self._warm_repo_autocomplete_cache())
         await self._restore_pending_runs()
@@ -633,7 +637,7 @@ class DevBotClient(discord.Client):
                 timeout=1.5,
             )
         except Exception as exc:
-            print(f"[repo_autocomplete] GitHub repository lookup failed: {exc}")
+            logger.warning("repo_autocomplete: GitHub repository lookup failed: %s", exc)
             fallback = self.github_client.fallback_repositories()
             return [app_commands.Choice(name=repo, value=repo) for repo in fallback[:25]]
         return [app_commands.Choice(name=repo, value=repo) for repo in repos]
@@ -642,7 +646,7 @@ class DevBotClient(discord.Client):
         try:
             await asyncio.to_thread(self.github_client.warm_repository_cache)
         except Exception as exc:
-            print(f"[repo_autocomplete] cache warm failed: {exc}")
+            logger.warning("repo_autocomplete: cache warm failed: %s", exc)
             return
 
     async def _generate_plan(self, interaction: discord.Interaction, repo: str, *, alias_used: bool) -> None:
