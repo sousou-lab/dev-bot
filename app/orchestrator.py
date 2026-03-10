@@ -60,6 +60,41 @@ class Orchestrator:
     def is_queued(self, thread_id: int) -> bool:
         return thread_id in self._queued_thread_ids
 
+    def pending_count(self) -> int:
+        return self._queue.qsize()
+
+    def active_count(self) -> int:
+        self._cleanup_finished()
+        return len(self._running)
+
+    async def drain(self) -> None:
+        """Gracefully stop: cancel dispatcher, drain queue, cancel running tasks."""
+        # Stop the dispatcher loop
+        if self._dispatcher_task and not self._dispatcher_task.done():
+            self._dispatcher_task.cancel()
+            try:
+                await self._dispatcher_task
+            except asyncio.CancelledError:
+                pass
+
+        # Drain the queue
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self._queued_thread_ids.clear()
+        self._queued_keys.clear()
+
+        # Cancel running tasks
+        tasks = list(self._running.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._running.clear()
+        self._running_keys.clear()
+
     async def _dispatch_loop(self) -> None:
         while True:
             if len(self._running) >= self.max_concurrency:
