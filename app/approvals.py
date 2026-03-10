@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any
 
 from app.state_store import FileStateStore
 
@@ -24,7 +23,9 @@ class ApprovalCoordinator:
         self.state_store = state_store
         self._pending: dict[int, asyncio.Future[bool]] = {}
 
-    def create_request(self, thread_id: int, run_id: str, tool_name: str, input_text: str, reason: str) -> ApprovalRequest:
+    def create_request(
+        self, thread_id: int, run_id: str, tool_name: str, input_text: str, reason: str
+    ) -> ApprovalRequest:
         request = ApprovalRequest(
             thread_id=thread_id,
             run_id=run_id,
@@ -47,7 +48,7 @@ class ApprovalCoordinator:
             if timeout_seconds is None:
                 return await future
             return await asyncio.wait_for(future, timeout=timeout_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             payload = self.state_store.load_artifact(thread_id, "pending_approval.json")
             if isinstance(payload, dict) and payload:
                 payload["status"] = "expired"

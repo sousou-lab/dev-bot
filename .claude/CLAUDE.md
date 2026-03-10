@@ -22,11 +22,24 @@ python -m pytest tests/test_orchestrator.py -v
 python -m pytest tests/test_orchestrator.py::OrchestratorTests::test_enqueue_sets_status_and_prevents_duplicates -v
 
 # Install dependencies
-pip install -r requirements.txt
+uv sync
 npm install
-```
 
-No explicit lint/format tooling is configured in this repo.
+# Lint check
+uv run ruff check app/ tests/
+
+# Format check
+uv run ruff format --check app/ tests/
+
+# Auto-fix lint issues
+uv run ruff check app/ tests/ --fix
+
+# Auto-format
+uv run ruff format app/ tests/
+
+# Type check
+uv run pyright app/
+```
 
 ## Architecture
 

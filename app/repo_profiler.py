@@ -107,7 +107,9 @@ def _detect_migration(root: Path, files: list[str]) -> dict[str, Any]:
             "rollback_cmds": ["alembic downgrade -1"],
             "notes": ["DATABASE_URL などの接続先はテストDBに向けておくこと"],
         }
-    if (root / "manage.py").exists() and any("/migrations/" in path or path.endswith("/migrations/__init__.py") for path in files):
+    if (root / "manage.py").exists() and any(
+        "/migrations/" in path or path.endswith("/migrations/__init__.py") for path in files
+    ):
         return {
             "engine": "django",
             "apply_cmds": ["python manage.py migrate"],

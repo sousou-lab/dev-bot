@@ -4,10 +4,11 @@ import json
 import os
 import shlex
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -330,7 +331,9 @@ class CodexRunner:
             return payload.get("result", {})
         raise RuntimeError(f"app-server response not received for id={expected_id}")
 
-    def _build_turn_start_message(self, *, request_id: int, thread_id: str, prompt: str, workspace: str) -> dict[str, Any]:
+    def _build_turn_start_message(
+        self, *, request_id: int, thread_id: str, prompt: str, workspace: str
+    ) -> dict[str, Any]:
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -388,7 +391,11 @@ class CodexRunner:
                     return value
             content = item.get("content")
             if isinstance(content, list):
-                texts = [part.get("text", "") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str)]
+                texts = [
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                ]
                 return "".join(texts)
         return ""
 

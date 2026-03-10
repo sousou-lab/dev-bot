@@ -89,7 +89,10 @@ class WorkspaceManagerTests(unittest.TestCase):
 
             self.assertEqual("main", result["base_branch"])
             self.assertTrue(
-                any(cmd[:6] == ["git", "--git-dir", result["mirror"], "remote", "set-head", "origin"] for cmd in manager.commands)
+                any(
+                    cmd[:6] == ["git", "--git-dir", result["mirror"], "remote", "set-head", "origin"]
+                    for cmd in manager.commands
+                )
             )
 
     def test_prepare_plan_workspace_falls_back_to_remote_heads_when_remote_show_fails(self) -> None:

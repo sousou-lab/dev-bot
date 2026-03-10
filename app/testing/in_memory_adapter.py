@@ -51,10 +51,7 @@ class InMemoryAdapter:
         for msg in messages:
             if substring in msg:
                 return
-        raise AssertionError(
-            f"No message in channel {channel_id} contains {substring!r}.\n"
-            f"Messages: {messages}"
-        )
+        raise AssertionError(f"No message in channel {channel_id} contains {substring!r}.\nMessages: {messages}")
 
     def assert_message_order(self, channel_id: int, substrings: list[str]) -> None:
         messages = self.messages_for(channel_id)

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 from app.run_request import ensure_issue_and_enqueue
 from app.state_store import FileStateStore
-
 from tests.helpers import setup_planning_artifacts
 
 

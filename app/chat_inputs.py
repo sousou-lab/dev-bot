@@ -6,7 +6,6 @@ from typing import Any
 
 from app.state_store import FileStateStore
 
-
 ALLOWED_ATTACHMENT_SUFFIXES = {".txt", ".md", ".json"}
 MAX_ATTACHMENTS_PER_MESSAGE = 3
 MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
@@ -28,19 +27,13 @@ async def parse_message_inputs(message: Any) -> dict[str, Any]:
         if suffix not in ALLOWED_ATTACHMENT_SUFFIXES:
             allowed = ", ".join(sorted(ALLOWED_ATTACHMENT_SUFFIXES))
             return {
-                "error": (
-                    f"`{attachment.filename}` は非対応形式です。"
-                    f" {allowed} のいずれかにして再送してください。"
-                ),
+                "error": (f"`{attachment.filename}` は非対応形式です。 {allowed} のいずれかにして再送してください。"),
                 "body": "",
                 "attachments": [],
             }
         if attachment.size > MAX_ATTACHMENT_BYTES:
             return {
-                "error": (
-                    f"`{attachment.filename}` はサイズ上限を超えています。"
-                    " 2MB 以下にして再送してください。"
-                ),
+                "error": (f"`{attachment.filename}` はサイズ上限を超えています。 2MB 以下にして再送してください。"),
                 "body": "",
                 "attachments": [],
             }

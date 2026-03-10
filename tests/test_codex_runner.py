@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from app.runners.codex_runner import CodexRunResult, CodexRunner
+from app.runners.codex_runner import CodexRunner, CodexRunResult
 
 
 class CodexRunnerTests(unittest.TestCase):
@@ -13,8 +13,9 @@ class CodexRunnerTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             runner = CodexRunner(app_server_command="disabled")
 
-            with patch.object(runner, "_run_app_server") as run_app_server:
-                with patch.object(
+            with (
+                patch.object(runner, "_run_app_server") as run_app_server,
+                patch.object(
                     runner,
                     "_run_exec_fallback",
                     return_value=CodexRunResult(
@@ -24,16 +25,17 @@ class CodexRunnerTests(unittest.TestCase):
                         summary="ok",
                         mode="exec-fallback",
                     ),
-                ) as run_exec_fallback:
-                    result = runner.run(
-                        workspace=tmpdir,
-                        run_dir=tmpdir,
-                        issue={},
-                        requirement_summary={},
-                        plan={},
-                        test_plan={},
-                        workflow_text="",
-                    )
+                ) as run_exec_fallback,
+            ):
+                result = runner.run(
+                    workspace=tmpdir,
+                    run_dir=tmpdir,
+                    issue={},
+                    requirement_summary={},
+                    plan={},
+                    test_plan={},
+                    workflow_text="",
+                )
 
             run_app_server.assert_not_called()
             run_exec_fallback.assert_called_once()
@@ -59,8 +61,6 @@ class CodexRunnerTests(unittest.TestCase):
     def test_extract_text_delta_reads_item_content(self) -> None:
         runner = CodexRunner()
 
-        delta = runner._extract_text_delta(
-            {"params": {"item": {"content": [{"type": "text", "text": "hello"}]}}}
-        )
+        delta = runner._extract_text_delta({"params": {"item": {"content": [{"type": "text", "text": "hello"}]}}})
 
         self.assertEqual("hello", delta)

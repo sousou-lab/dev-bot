@@ -82,4 +82,3 @@ class PlanningAgentHelpersTests(unittest.TestCase):
         self.assertEqual("TS-01-TC-01", merged["cases"][0]["id"])
         self.assertEqual("TS-02-TC-01", merged["cases"][1]["id"])
         self.assertEqual("TS-01-TC-02", merged["cases"][2]["id"])
-

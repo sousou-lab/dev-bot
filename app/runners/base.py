@@ -8,4 +8,3 @@ class CommandExecution:
     command: str
     returncode: int
     output: str
-

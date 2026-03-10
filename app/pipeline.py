@@ -89,7 +89,7 @@ class DevelopmentPipeline:
             raise RuntimeError("Missing planning artifacts before run.")
 
         run_id = self.state_store.create_execution_run(thread_id)
-        execution = ExecutionContext(thread_id=thread_id, run_id=run_id, repo_full_name=repo_full_name, issue=issue)
+        _execution = ExecutionContext(thread_id=thread_id, run_id=run_id, repo_full_name=repo_full_name, issue=issue)
         artifacts_dir = self.state_store.execution_artifacts_dir(thread_id, run_id)
         run_log_path = artifacts_dir / "run.log"
         workpad_updates_path = artifacts_dir / "workpad_updates.jsonl"
@@ -616,11 +616,15 @@ class DevelopmentPipeline:
         return [line[3:] for line in output.splitlines() if len(line) >= 4]
 
     def _capture_git_diff(self, workspace: str) -> str:
-        completed = subprocess.run(["git", "-C", workspace, "diff", "--stat", "--patch"], capture_output=True, text=True, check=True)
+        completed = subprocess.run(
+            ["git", "-C", workspace, "diff", "--stat", "--patch"], capture_output=True, text=True, check=True
+        )
         return completed.stdout
 
     def _commit_and_push(self, workspace: str, branch_name: str, issue_number: int) -> bool:
-        status = subprocess.run(["git", "-C", workspace, "status", "--porcelain"], capture_output=True, text=True, check=True)
+        status = subprocess.run(
+            ["git", "-C", workspace, "status", "--porcelain"], capture_output=True, text=True, check=True
+        )
         if not status.stdout.strip():
             return False
         subprocess.run(["git", "-C", workspace, "add", "-A"], check=True)

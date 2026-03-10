@@ -75,7 +75,9 @@ class GitHubIssueClient:
             repo_full_name=repo_full_name,
         )
 
-    def create_pull_request(self, repo_full_name: str, title: str, body: str, head: str, base: str, draft: bool) -> dict:
+    def create_pull_request(
+        self, repo_full_name: str, title: str, body: str, head: str, base: str, draft: bool
+    ) -> dict:
         repo = self._get_repo(repo_full_name)
         try:
             pr = repo.create_pull(title=title, body=body, head=head, base=base, draft=draft)
@@ -216,7 +218,7 @@ class GitHubIssueClient:
 
     def build_git_env(self) -> dict[str, str]:
         token = self.installation_token()
-        basic_auth = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+        basic_auth = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
         env = os.environ.copy()
         env.update(
             {
@@ -341,11 +343,7 @@ class GitHubIssueClient:
         }
         """
         payload = self._graphql(query, {"issueId": issue_node_id})
-        nodes = (
-            payload.get("node", {})
-            .get("projectItems", {})
-            .get("nodes", [])
-        )
+        nodes = payload.get("node", {}).get("projectItems", {}).get("nodes", [])
         if not isinstance(nodes, list):
             return ""
         for item in nodes:

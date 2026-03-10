@@ -81,7 +81,9 @@ class GitHubIssueClientTests(unittest.TestCase):
 
     def test_suggest_cached_repositories_uses_installation_fallback_when_cache_empty(self) -> None:
         client = GitHubIssueClient(app_id="1", private_key_path="/tmp/key.pem", installation_id="2")
-        with patch.object(client, "_list_installation_repositories", return_value=["hayasesou/dev-bot", "hayasesou/other"]):
+        with patch.object(
+            client, "_list_installation_repositories", return_value=["hayasesou/dev-bot", "hayasesou/other"]
+        ):
             repos = client.suggest_repositories("hayase", limit=25)
 
         self.assertEqual(["hayasesou/dev-bot", "hayasesou/other"], repos)

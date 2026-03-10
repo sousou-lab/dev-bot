@@ -1,4 +1,5 @@
 """Pipeline E2E tests using InMemoryAdapter — no Discord server required."""
+
 from __future__ import annotations
 
 import tempfile
@@ -13,7 +14,6 @@ from app.process_registry import ProcessRegistry
 from app.runners.codex_runner import CodexRunResult
 from app.state_store import FileStateStore
 from app.testing.in_memory_adapter import InMemoryAdapter
-
 from tests.helpers import make_test_issue, make_test_settings, setup_planning_artifacts
 
 THREAD_ID = 42
@@ -28,9 +28,7 @@ def _make_workspace_info(workspace: str) -> dict[str, Any]:
     }
 
 
-def _make_codex_result(
-    returncode: int = 0, stdout_path: str = "/dev/null", mode: str = "app-server"
-) -> CodexRunResult:
+def _make_codex_result(returncode: int = 0, stdout_path: str = "/dev/null", mode: str = "app-server") -> CodexRunResult:
     return CodexRunResult(
         returncode=returncode,
         stdout_path=stdout_path,
@@ -148,9 +146,7 @@ class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
         return patch.object(self.pipeline, "_commit_and_push", return_value=pushed)
 
     def _patch_detect_changed(self, files: list[str] | None = None) -> Any:
-        return patch.object(
-            self.pipeline, "_detect_changed_files", return_value=files or ["file.py"]
-        )
+        return patch.object(self.pipeline, "_detect_changed_files", return_value=files or ["file.py"])
 
     def _patch_workflow(self, workflow: dict[str, Any] | None = None) -> Any:
         return patch("app.pipeline.load_workflow", return_value=workflow or {"commands": {}})

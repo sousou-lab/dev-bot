@@ -60,7 +60,9 @@ class ChatInputsTests(unittest.IsolatedAsyncioTestCase):
             state_store = FileStateStore(tmpdir)
             state_store.create_run(thread_id=100, parent_message_id=200, channel_id=300)
             parsed = await parse_message_inputs(
-                FakeMessage("添付を読んでください", [FakeAttachment("requirements.md", "# Title\ncontent")], message_id=123)
+                FakeMessage(
+                    "添付を読んでください", [FakeAttachment("requirements.md", "# Title\ncontent")], message_id=123
+                )
             )
 
             payload = materialize_message_payload(
