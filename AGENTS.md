@@ -1,37 +1,37 @@
 # AGENTS.md
 
-## Purpose
-このリポジトリは Discord から起動される自律型開発オーケストレータである。
-制御面は `claude-agent-sdk`、実装面は Codex CLI worker を前提にする。
+## Project Overview
+- This repository is an issue-driven agent harness.
+- GitHub Issues plus GitHub Projects v2 are the operational source of truth.
+- Discord is used for requirements clarification, plan review, plan approval, and status mirroring.
+- Planning uses Claude Agent SDK in Python.
+- Implementation uses Codex app-server.
 
-## Architecture Map
-- Control plane は Claude Agent SDK を使う
-- Implementation worker は Codex CLI を使う
-- 実行契約は `WORKFLOW.md` を system of record とする
-- Skills は `.claude/skills/` に置く
-- 詳細設計は `docs/ARCHITECTURE.md` に置く
+## Mandatory Skill Usage
+- Use `$issue-workpad` before changing code or state tied to a GitHub issue.
+- Use `$implementation-plan` before editing runtime, orchestration, tracker, workspace, or approval logic.
+- Use `$code-change-verification` when runtime code, tests, or build/test behavior changes.
+- Use `$draft-pr` when a substantial code change is ready for review.
+- Use `$issue-transition` whenever you update issue state, Project v2 fields, or the workpad.
 
-## Required Rules
-- 実装前に `/plan` を通し、`plan.json` と `test_plan.json` を生成する
-- Claude の新規実装は必ず `claude-agent-sdk` の公式 API を使う
-- 高リスク操作は approval gateway を通す
-- proof-of-work artifact を揃えてから PR を作成する
-- 同一 issue / thread の workspace は再利用する
-- `/abort` は状態更新だけでなく実プロセス停止まで行う
+## Execution Boundaries
+- Treat GitHub Project v2 `State` and `Plan` fields as the scheduler contract.
+- Do not implement anything if `Plan != Approved`.
+- Do not write outside the issue workspace.
+- Do not push to the default branch.
+- Do not change secrets handling, GitHub App credentials, or approval policy without explicit issue scope.
+- Do not silently broaden scope beyond the issue acceptance criteria.
 
-## Allowed Stacks
-- `claude-agent-sdk`
-- Codex CLI
-- Python subprocess wrappers for Codex / git / test commands
+## Build And Test Expectations
+- Prefer repository-defined commands from `plan.json`, `test_plan.json`, and repo profiler output.
+- If commands disagree, prefer explicit repository policy over heuristics.
+- Do not mark work complete until verification artifacts are updated.
 
-## Prohibited
-- Claude 実行を CLI 直叩きに置き換えること
-- Codex を control plane として使うこと
-- `bypassPermissions` を通常実行の既定値にすること
-- repo 外ディレクトリを agent に触らせること
-- 実行中プロセスを止めない `/abort`
+## Security Rules
+- Never place tokens in git remote URLs.
+- Never print secrets into logs or artifacts.
+- Treat `.env`, secret stores, GitHub App private keys, and production credentials as protected paths.
 
-## Pointer Docs
-- `WORKFLOW.md`
-- `docs/ARCHITECTURE.md`
-- `.claude/skills/`
+## Planning Lane Note
+- Claude-specific planning guidance belongs under `.claude/`.
+- Root `AGENTS.md` is Codex-facing repository policy and must stay short.

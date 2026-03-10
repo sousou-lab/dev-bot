@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,9 +44,16 @@ class DevelopmentPipeline:
         self.github_client = github_client
         self.process_registry = process_registry
         self.approval_coordinator = approval_coordinator
-        self.workspace_manager = WorkspaceManager(settings)
-        self.codex_runner = CodexRunner(settings.codex_bin)
-        self.claude_runner = ClaudeRunner(settings.anthropic_api_key)
+        self.workspace_manager = WorkspaceManager(settings, github_client=github_client)
+        self.codex_runner = CodexRunner(
+            settings.codex_bin,
+            app_server_command=settings.codex_app_server_command,
+            model=settings.codex_model,
+        )
+        self.claude_runner = ClaudeRunner(
+            settings.anthropic_api_key,
+            max_buffer_size=settings.claude_agent_max_buffer_size,
+        )
 
     async def abort(self, thread_id: int) -> bool:
         stopped = await asyncio.to_thread(self.process_registry.terminate, thread_id)
@@ -72,6 +80,15 @@ class DevelopmentPipeline:
 
         run_id = self.state_store.create_execution_run(thread_id)
         execution = ExecutionContext(thread_id=thread_id, run_id=run_id, repo_full_name=repo_full_name, issue=issue)
+        artifacts_dir = self.state_store.execution_artifacts_dir(thread_id, run_id)
+        run_log_path = artifacts_dir / "run.log"
+        workpad_updates_path = artifacts_dir / "workpad_updates.jsonl"
+        self._append_run_log(run_log_path, "run start")
+
+        issue_snapshot = await asyncio.to_thread(self._load_issue_snapshot, repo_full_name, issue)
+        self.state_store.write_execution_artifact(thread_id, "issue_snapshot.json", issue_snapshot, run_id)
+        self.state_store.write_artifact(thread_id, "issue_snapshot.json", issue_snapshot)
+
         self.state_store.update_status(thread_id, "running")
         self.state_store.record_activity(
             thread_id,
@@ -81,6 +98,27 @@ class DevelopmentPipeline:
             run_id=run_id,
             details={"repo": repo_full_name, "issue_number": issue.get("number")},
         )
+        await asyncio.to_thread(
+            self._update_issue_tracking,
+            repo_full_name,
+            int(issue["number"]),
+            "In Progress",
+            self._build_workpad_sections(
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                issue=issue_snapshot,
+                current_state="In Progress",
+                latest_attempt="run started",
+                branch="",
+                pr="",
+                verification={},
+                blockers=[],
+                artifacts=["issue_snapshot.json", "plan.json", "test_plan.json", "run.log"],
+                audit_trail=[f"{datetime.now(UTC).isoformat()} run started"],
+            ),
+            workpad_updates_path,
+        )
         await channel.send("run を開始しました。workspace を準備します。")
 
         workspace_info = await asyncio.to_thread(
@@ -89,6 +127,7 @@ class DevelopmentPipeline:
             int(issue["number"]),
             thread_id,
             str(self.state_store.execution_run_dir(thread_id, run_id)),
+            issue.get("title"),
         )
         self.state_store.record_activity(
             thread_id,
@@ -114,65 +153,87 @@ class DevelopmentPipeline:
         self.state_store.write_execution_artifact(thread_id, "plan.json", plan, run_id)
         self.state_store.write_execution_artifact(thread_id, "test_plan.json", test_plan, run_id)
         self.state_store.write_execution_artifact(thread_id, "issue.json", issue, run_id)
+        self.state_store.write_execution_artifact(
+            thread_id,
+            "runner_metadata.json",
+            {
+                "runner": "codex",
+                "mode": "pending",
+                "workspace_key": workspace_info.get("workspace_key", ""),
+                "workspace": workspace_info["workspace"],
+                "branch_name": workspace_info["branch_name"],
+            },
+            run_id,
+        )
 
-        artifacts_dir = self.state_store.execution_artifacts_dir(thread_id, run_id)
-        codex_log_path = artifacts_dir / "codex_run.log"
-        prompt = self.codex_runner.build_prompt(
+        codex_result = await asyncio.to_thread(
+            self.codex_runner.run,
+            workspace=workspace_info["workspace"],
+            run_dir=str(self.state_store.execution_run_dir(thread_id, run_id)),
             issue=issue,
             requirement_summary=summary,
             plan=plan,
             test_plan=test_plan,
             workflow_text=workflow_text(workspace=workspace_info["workspace"]) or workflow_text(repo_root="."),
+            on_process_start=lambda pid: self.process_registry.register(thread_id, run_id, pid, "codex"),
+            on_process_exit=lambda: self.process_registry.unregister(thread_id),
         )
-        process = await asyncio.to_thread(
-            self.codex_runner.start,
-            workspace=workspace_info["workspace"],
-            stdout_path=str(codex_log_path),
+        codex_log_path = Path(codex_result.stdout_path)
+        self.state_store.write_execution_artifact(
+            thread_id,
+            "runner_metadata.json",
+            {
+                "runner": "codex",
+                "mode": codex_result.mode,
+                "workspace_key": workspace_info.get("workspace_key", ""),
+                "workspace": workspace_info["workspace"],
+                "branch_name": workspace_info["branch_name"],
+            },
+            run_id,
         )
-        self.process_registry.register(thread_id, run_id, process.pid, "codex")
         self.state_store.record_activity(
             thread_id,
             phase="codex_start",
             summary="Codex 実装を開始しました",
             status="running",
             run_id=run_id,
-            details={"pid": process.pid, "log_path": str(codex_log_path)},
+            details={"log_path": str(codex_log_path), "mode": codex_result.mode},
         )
-        assert process.stdin is not None
-        process.stdin.write(prompt)
-        process.stdin.close()
-        returncode = await asyncio.to_thread(process.wait)
-        self.process_registry.unregister(thread_id)
+        self._append_run_log(run_log_path, "codex start")
+        returncode = codex_result.returncode
         self.state_store.record_activity(
             thread_id,
             phase="codex_finish",
             summary="Codex 実装が終了しました",
             status="running" if returncode == 0 else "failed",
             run_id=run_id,
-            details={"returncode": returncode},
+            details={"returncode": returncode, "mode": codex_result.mode},
         )
+        self._append_run_log(run_log_path, f"codex finish rc={returncode}")
 
         changed_files = {"changed_files": self._detect_changed_files(workspace_info["workspace"])}
         self.state_store.write_execution_artifact(thread_id, "changed_files.json", changed_files, run_id)
         self.state_store.write_artifact(thread_id, "changed_files.json", changed_files)
 
         if returncode != 0:
-            self.state_store.update_status(thread_id, "failed")
-            self.state_store.record_activity(
-                thread_id,
-                phase="run_failed",
-                summary="Codex 実装で失敗しました",
-                status="failed",
+            await self._finalize_failure(
+                thread_id=thread_id,
                 run_id=run_id,
-                details={"returncode": returncode},
+                repo_full_name=repo_full_name,
+                issue=issue_snapshot,
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                state="Rework",
+                failure_type="codex_failure",
+                latest_attempt=f"codex failed rc={returncode}",
+                branch=workspace_info["branch_name"],
+                blockers=[],
+                artifacts=["changed_files.json", "final_summary.json", "run.log"],
+                verification={},
+                extra={"returncode": returncode},
             )
             await channel.send(f"Codex 実装で失敗しました。終了コード: `{returncode}`")
-            self.state_store.write_execution_artifact(
-                thread_id,
-                "final_result.json",
-                {"success": False, "failure_type": "codex_failure", "returncode": returncode},
-                run_id,
-            )
             return
 
         await channel.send("Codex 実装が完了しました。検証を開始します。")
@@ -193,22 +254,27 @@ class DevelopmentPipeline:
         )
         self.state_store.write_execution_artifact(thread_id, "command_results.json", command_results, run_id)
         self.state_store.write_artifact(thread_id, "command_results.json", command_results)
-        if command_results.get("failure_type") == "approval_denied":
-            self.state_store.record_activity(
-                thread_id,
-                phase="run_failed",
-                summary="高リスク操作が拒否されました",
-                status="failed",
+        if command_results.get("failure_type"):
+            failure_type = str(command_results["failure_type"])
+            state = "Human Review" if failure_type == "policy_violation" else "Blocked"
+            await self._finalize_failure(
+                thread_id=thread_id,
                 run_id=run_id,
-                details={"failure_type": "approval_denied"},
+                repo_full_name=repo_full_name,
+                issue=issue_snapshot,
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                state=state,
+                failure_type=failure_type,
+                latest_attempt="workflow command blocked",
+                branch=workspace_info["branch_name"],
+                blockers=[f"blocked command: {command_results.get('stopped_before_command', '')}"],
+                artifacts=["command_results.json", "final_summary.json", "run.log"],
+                verification={},
+                extra={"stopped_before_command": command_results.get("stopped_before_command", "")},
             )
-            self.state_store.write_execution_artifact(
-                thread_id,
-                "final_result.json",
-                {"success": False, "failure_type": "approval_denied"},
-                run_id,
-            )
-            await channel.send("高リスク操作が拒否されたため run を停止しました。")
+            await channel.send("禁止または高リスクの workflow command を検出したため run を停止しました。")
             return
 
         self.state_store.update_status(thread_id, "verifying")
@@ -228,25 +294,30 @@ class DevelopmentPipeline:
             plan=plan,
             test_plan=test_plan,
         )
+        verification_json = self._build_verification_json(command_results, verification, test_plan)
         self.state_store.write_execution_artifact(thread_id, "verification_summary.json", verification, run_id)
         self.state_store.write_artifact(thread_id, "verification_summary.json", verification)
+        self.state_store.write_execution_artifact(thread_id, "verification.json", verification_json, run_id)
+        self.state_store.write_artifact(thread_id, "verification.json", verification_json)
         if verification.get("status") not in {"success", "passed", "completed"}:
-            self.state_store.update_status(thread_id, "failed")
-            self.state_store.record_activity(
-                thread_id,
-                phase="run_failed",
-                summary="verification が失敗しました",
-                status="failed",
+            await self._finalize_failure(
+                thread_id=thread_id,
                 run_id=run_id,
-                details={"failure_type": verification.get("failure_type", "verification_failed")},
+                repo_full_name=repo_full_name,
+                issue=issue_snapshot,
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                state="Rework",
+                failure_type=str(verification.get("failure_type", "verification_failed")),
+                latest_attempt="verification failed",
+                branch=workspace_info["branch_name"],
+                blockers=[],
+                artifacts=["verification.json", "final_summary.json", "run.log"],
+                verification=verification_json,
+                extra={},
             )
             await channel.send("verification が失敗しました。`/status` と `/why-failed` を確認してください。")
-            self.state_store.write_execution_artifact(
-                thread_id,
-                "final_result.json",
-                {"success": False, "failure_type": verification.get("failure_type", "verification_failed")},
-                run_id,
-            )
             return
 
         git_diff = await asyncio.to_thread(self._capture_git_diff, workspace_info["workspace"])
@@ -262,50 +333,64 @@ class DevelopmentPipeline:
         self.state_store.write_execution_artifact(thread_id, "review_summary.json", review, run_id)
         self.state_store.write_artifact(thread_id, "review_summary.json", review)
         if review.get("decision") == "reject":
-            self.state_store.update_status(thread_id, "failed")
-            self.state_store.record_activity(
-                thread_id,
-                phase="run_failed",
-                summary="review が reject を返しました",
-                status="failed",
+            await self._finalize_failure(
+                thread_id=thread_id,
                 run_id=run_id,
-                details={"failure_type": "review_reject"},
+                repo_full_name=repo_full_name,
+                issue=issue_snapshot,
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                state="Rework",
+                failure_type="review_reject",
+                latest_attempt="review rejected",
+                branch=workspace_info["branch_name"],
+                blockers=[],
+                artifacts=["verification.json", "review_summary.json", "final_summary.json", "run.log"],
+                verification=verification_json,
+                extra={},
             )
             await channel.send("review が reject を返したため PR 作成を中止しました。")
-            self.state_store.write_execution_artifact(
-                thread_id,
-                "final_result.json",
-                {"success": False, "failure_type": "review_reject"},
-                run_id,
-            )
             return
 
+        self.state_store.write_execution_artifact(
+            thread_id,
+            "final_summary.json",
+            {"success": True, "state": "Human Review"},
+            run_id,
+        )
         proof = evaluate_proof_of_work(
             workflow,
             {
+                "issue_snapshot.json",
+                "requirement_summary.json",
                 "plan.json",
                 "test_plan.json",
                 "changed_files.json",
-                "command_results.json",
-                "verification_summary.json",
-                "review_summary.json",
+                "verification.json",
+                "final_summary.json",
+                "run.log",
+                "workpad_updates.jsonl",
+                "runner_metadata.json",
             },
         )
         if not proof.complete:
-            self.state_store.update_status(thread_id, "failed")
-            self.state_store.record_activity(
-                thread_id,
-                phase="run_failed",
-                summary="proof-of-work artifact が不足しています",
-                status="failed",
+            await self._finalize_failure(
+                thread_id=thread_id,
                 run_id=run_id,
-                details={"missing_artifacts": proof.missing_artifacts},
-            )
-            self.state_store.write_execution_artifact(
-                thread_id,
-                "final_result.json",
-                {"success": False, "failure_type": "missing_artifacts", "missing_artifacts": proof.missing_artifacts},
-                run_id,
+                repo_full_name=repo_full_name,
+                issue=issue_snapshot,
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                state="Rework",
+                failure_type="missing_artifacts",
+                latest_attempt="proof of work incomplete",
+                branch=workspace_info["branch_name"],
+                blockers=[f"missing artifacts: {', '.join(proof.missing_artifacts)}"],
+                artifacts=["verification.json", "final_summary.json", "run.log"],
+                verification=verification_json,
+                extra={"missing_artifacts": proof.missing_artifacts},
             )
             await channel.send("proof-of-work artifact が不足しているため完了できませんでした。")
             return
@@ -314,16 +399,25 @@ class DevelopmentPipeline:
             self._commit_and_push,
             workspace_info["workspace"],
             workspace_info["branch_name"],
-            issue["number"],
+            int(issue["number"]),
         )
         if not pushed:
-            self.state_store.update_status(thread_id, "failed")
-            self.state_store.record_activity(
-                thread_id,
-                phase="run_failed",
-                summary="変更差分が作られませんでした",
-                status="failed",
+            await self._finalize_failure(
+                thread_id=thread_id,
                 run_id=run_id,
+                repo_full_name=repo_full_name,
+                issue=issue_snapshot,
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                state="Rework",
+                failure_type="no_changes",
+                latest_attempt="no changes to commit",
+                branch=workspace_info["branch_name"],
+                blockers=[],
+                artifacts=["changed_files.json", "final_summary.json", "run.log"],
+                verification=verification_json,
+                extra={},
             )
             await channel.send("変更差分が作られなかったため PR 作成を中止しました。")
             return
@@ -348,7 +442,17 @@ class DevelopmentPipeline:
             int(pr["number"]),
             comment_body,
         )
+
+        final_summary = {
+            "success": True,
+            "state": "Human Review",
+            "branch": workspace_info["branch_name"],
+            "pr": pr["url"],
+            "changed_files": changed_files.get("changed_files", []),
+        }
         final_result = {"success": True, "pr": pr, "review": review, "verification": verification}
+        self.state_store.write_execution_artifact(thread_id, "final_summary.json", final_summary, run_id)
+        self.state_store.write_artifact(thread_id, "final_summary.json", final_summary)
         self.state_store.write_execution_artifact(thread_id, "final_result.json", final_result, run_id)
         self.state_store.write_artifact(thread_id, "final_result.json", final_result)
         self.state_store.update_meta(thread_id, status="completed", pr_number=str(pr["number"]), pr_url=pr["url"])
@@ -360,35 +464,93 @@ class DevelopmentPipeline:
             run_id=run_id,
             details={"pr_number": pr["number"], "pr_url": pr["url"]},
         )
+        await asyncio.to_thread(
+            self._update_issue_tracking,
+            repo_full_name,
+            int(issue["number"]),
+            "Human Review",
+            self._build_workpad_sections(
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                issue=issue_snapshot,
+                current_state="Human Review",
+                latest_attempt="draft pr created",
+                branch=workspace_info["branch_name"],
+                pr=f"draft #{pr['number']} {pr['url']}",
+                verification=verification_json,
+                blockers=[],
+                artifacts=[
+                    "issue_snapshot.json",
+                    "plan.json",
+                    "test_plan.json",
+                    "changed_files.json",
+                    "verification.json",
+                    "final_summary.json",
+                    "run.log",
+                ],
+                audit_trail=[f"{datetime.now(UTC).isoformat()} draft pr created"],
+            ),
+            workpad_updates_path,
+        )
         await channel.send(f"draft PR を作成しました。\n- PR: #{pr['number']}\n- URL: {pr['url']}")
 
-    def _execute_repo_commands(self, workspace: str, workflow: dict[str, Any], thread_id: int, run_id: str) -> dict[str, Any]:
-        commands = workflow.get("commands", {})
-        results: list[dict[str, Any]] = []
-        for phase in ("setup", "lint", "test"):
-            phase_commands = commands.get(phase, []) if isinstance(commands, dict) else []
-            if not isinstance(phase_commands, list):
-                continue
-            for command in phase_commands:
-                if is_high_risk_command(command):
-                    raise RuntimeError(f"High-risk command reached sync path unexpectedly: {command}")
-                completed = subprocess.run(
-                    command,
-                    cwd=workspace,
-                    shell=True,
-                    text=True,
-                    capture_output=True,
-                )
-                results.append(
-                    {
-                        "phase": phase,
-                        "command": command,
-                        "returncode": completed.returncode,
-                        "output": (completed.stdout + completed.stderr)[-4000:],
-                        "success": completed.returncode == 0,
-                    }
-                )
-        return {"results": results}
+    async def _finalize_failure(
+        self,
+        *,
+        thread_id: int,
+        run_id: str,
+        repo_full_name: str,
+        issue: dict[str, Any],
+        summary: dict[str, Any],
+        plan: dict[str, Any],
+        test_plan: dict[str, Any],
+        state: str,
+        failure_type: str,
+        latest_attempt: str,
+        branch: str,
+        blockers: list[str],
+        artifacts: list[str],
+        verification: dict[str, Any],
+        extra: dict[str, Any],
+    ) -> None:
+        workpad_updates_path = self.state_store.execution_artifacts_dir(thread_id, run_id) / "workpad_updates.jsonl"
+        final_summary = {"success": False, "state": state, "failure_type": failure_type, **extra}
+        final_result = {"success": False, "failure_type": failure_type, **extra}
+        self.state_store.update_status(thread_id, "failed")
+        self.state_store.write_execution_artifact(thread_id, "final_summary.json", final_summary, run_id)
+        self.state_store.write_artifact(thread_id, "final_summary.json", final_summary)
+        self.state_store.write_execution_artifact(thread_id, "final_result.json", final_result, run_id)
+        self.state_store.write_artifact(thread_id, "final_result.json", final_result)
+        self.state_store.record_activity(
+            thread_id,
+            phase="run_failed",
+            summary=failure_type,
+            status="failed",
+            run_id=run_id,
+            details=extra,
+        )
+        await asyncio.to_thread(
+            self._update_issue_tracking,
+            repo_full_name,
+            int(issue["number"]),
+            state,
+            self._build_workpad_sections(
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                issue=issue,
+                current_state=state,
+                latest_attempt=latest_attempt,
+                branch=branch,
+                pr="",
+                verification=verification,
+                blockers=blockers,
+                artifacts=artifacts,
+                audit_trail=[f"{datetime.now(UTC).isoformat()} failure: {failure_type}"],
+            ),
+            workpad_updates_path,
+        )
 
     async def execute_workflow_commands(
         self,
@@ -400,6 +562,7 @@ class DevelopmentPipeline:
         thread_id: int,
         run_id: str,
     ) -> dict[str, Any]:
+        del client, thread_id, run_id
         commands = workflow.get("commands", {})
         results: list[dict[str, Any]] = []
         for phase in ("setup", "lint", "test"):
@@ -408,36 +571,16 @@ class DevelopmentPipeline:
                 continue
             for command in phase_commands:
                 if is_high_risk_command(command):
-                    request = self.approval_coordinator.create_request(
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        tool_name="Bash",
-                        input_text=command,
-                        reason=f"workflow command `{phase}` is marked high risk",
-                    )
-                    view = client.build_approval_view() if hasattr(client, "build_approval_view") else None
                     await channel.send(
-                        "高リスク操作の承認が必要です。\n"
+                        "禁止または高リスクの workflow command を検出したため停止します。\n"
                         f"- phase: `{phase}`\n"
-                        f"- command: `{command}`\n"
-                        f"- reason: {request.reason}",
-                        view=view,
+                        f"- command: `{command}`"
                     )
-                    approved = await self.approval_coordinator.wait_for_resolution(
-                        thread_id,
-                        timeout_seconds=self.settings.approval_timeout_seconds,
-                    )
-                    if not approved:
-                        self.state_store.update_status(thread_id, "failed")
-                        pending = self.state_store.load_artifact(thread_id, "pending_approval.json")
-                        failure_type = "approval_timeout" if isinstance(pending, dict) and pending.get("status") == "expired" else "approval_denied"
-                        return {
-                            "results": results,
-                            "failure_type": failure_type,
-                            "stopped_before_command": command,
-                        }
-                    self.state_store.update_status(thread_id, "running")
-
+                    return {
+                        "results": results,
+                        "failure_type": "policy_violation",
+                        "stopped_before_command": command,
+                    }
                 completed = await asyncio.to_thread(
                     subprocess.run,
                     command,
@@ -533,3 +676,100 @@ class DevelopmentPipeline:
                 ],
             ]
         )
+
+    def _load_issue_snapshot(self, repo_full_name: str, issue: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self.github_client.get_issue_snapshot(repo_full_name, int(issue["number"]))
+        except Exception:
+            return dict(issue)
+
+    def _update_issue_tracking(
+        self,
+        repo_full_name: str,
+        issue_number: int,
+        state: str,
+        sections: dict[str, Any],
+        workpad_updates_path: Path,
+    ) -> None:
+        self.github_client.update_issue_state(repo_full_name, issue_number, state)
+        self.github_client.upsert_workpad_comment(repo_full_name, issue_number, sections)
+        self._write_jsonl(
+            workpad_updates_path,
+            {"timestamp": datetime.now(UTC).isoformat(), "state": state, "sections": sections},
+        )
+
+    def _build_verification_json(
+        self,
+        command_results: dict[str, Any],
+        verification_summary: dict[str, Any],
+        test_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        results = command_results.get("results", []) if isinstance(command_results, dict) else []
+        phase_status = {"unit": "not_run", "integration": "not_run", "lint": "not_run", "typecheck": "not_run"}
+        for item in results:
+            phase = str(item.get("phase", ""))
+            status = "pass" if item.get("success") else "fail"
+            if phase == "lint":
+                phase_status["lint"] = status
+            elif phase == "test":
+                phase_status["unit"] = status
+        manual_checks = []
+        if isinstance(test_plan, dict):
+            for name in test_plan.get("manual_checks", []):
+                manual_checks.append({"name": str(name), "status": "not_run"})
+        return {
+            **phase_status,
+            "manual_checks": manual_checks,
+            "notes": verification_summary.get("notes", []) if isinstance(verification_summary, dict) else [],
+        }
+
+    def _build_workpad_sections(
+        self,
+        *,
+        summary: dict[str, Any],
+        plan: dict[str, Any],
+        test_plan: dict[str, Any],
+        issue: dict[str, Any],
+        current_state: str,
+        latest_attempt: str,
+        branch: str,
+        pr: str,
+        verification: dict[str, Any],
+        blockers: list[str],
+        artifacts: list[str],
+        audit_trail: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "Current State": current_state,
+            "Plan Approved": "true",
+            "Goal": summary.get("goal", issue.get("title", "")),
+            "Acceptance Criteria": summary.get("acceptance_criteria", []),
+            "Constraints": summary.get("constraints", []),
+            "Plan Summary": plan.get("steps", []),
+            "Test Plan": self._flatten_test_plan(test_plan),
+            "Latest Attempt": latest_attempt,
+            "Verification": json.dumps(verification, ensure_ascii=False, indent=2) if verification else "not available",
+            "Branch": branch or "なし",
+            "PR": pr or "なし",
+            "Blockers": blockers or ["なし"],
+            "Artifacts": artifacts or ["なし"],
+            "Audit Trail": audit_trail or ["なし"],
+        }
+
+    def _flatten_test_plan(self, test_plan: dict[str, Any]) -> list[str]:
+        items: list[str] = []
+        for key in ("unit", "integration", "manual_checks"):
+            value = test_plan.get(key, [])
+            if isinstance(value, list):
+                items.extend(f"{key}: {entry}" for entry in value)
+        return items
+
+    def _append_run_log(self, run_log_path: Path, line: str) -> None:
+        run_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with run_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(line.rstrip() + "\n")
+
+    def _write_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")

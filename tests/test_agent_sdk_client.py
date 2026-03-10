@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import sys
+import types
 import unittest
+from unittest.mock import patch
 
 from app.agent_sdk_client import (
+    AgentBufferOverflowError,
     AgentContextOverloadError,
     AgentForbiddenToolError,
     AgentJsonResponseError,
@@ -10,6 +14,8 @@ from app.agent_sdk_client import (
     AgentRateLimitError,
     AgentResult,
     ClaudeAgentClient,
+    _build_options,
+    _extract_buffer_overflow_error,
     _extract_context_overload_error,
     _extract_oversized_read_error,
     _extract_rate_limit_error,
@@ -206,6 +212,62 @@ class ClaudeAgentClientTests(unittest.TestCase):
         )
 
         self.assertEqual(("52696", 3), parsed)
+
+    def test_extract_buffer_overflow_error_reports_likely_tool_source(self) -> None:
+        parsed = _extract_buffer_overflow_error(
+            "Failed to decode JSON: JSON message exceeded maximum buffer size of 5242880 bytes",
+            [
+                "2026-03-09T23:45:35.359Z [DEBUG] executePreToolHooks called for tool: Read",
+            ],
+            max_buffer_size=5 * 1024 * 1024,
+        )
+
+        self.assertEqual((5 * 1024 * 1024, "tool_output", "last_tool=Read"), parsed)
+
+    def test_agent_buffer_overflow_error_keeps_diagnostics(self) -> None:
+        error = AgentBufferOverflowError(
+            "overflow",
+            stderr=["line1"],
+            prompt_kind="plan",
+            max_buffer_size=5 * 1024 * 1024,
+            likely_source="tool_output",
+            source_detail="last_tool=Read",
+        )
+
+        self.assertEqual(["line1"], error.stderr)
+        self.assertEqual("plan", error.prompt_kind)
+        self.assertEqual(5 * 1024 * 1024, error.max_buffer_size)
+        self.assertEqual("tool_output", error.likely_source)
+        self.assertEqual("last_tool=Read", error.source_detail)
+
+    def test_build_options_sets_max_buffer_size(self) -> None:
+        fake_module = types.ModuleType("claude_agent_sdk")
+
+        class FakeOptions:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        fake_module.ClaudeAgentOptions = FakeOptions
+
+        with patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            with patch("app.agent_sdk_client._resolve_claude_cli", return_value="/tmp/claude"):
+                with patch("app.agent_sdk_client._claude_version", return_value="1.0.0"):
+                    with patch("app.agent_sdk_client._claude_preflight", return_value={"ok": True}):
+                        options, _ = _build_options(
+                            api_key="dummy",
+                            system="system",
+                            cwd="/tmp/workspace",
+                            max_turns=2,
+                            max_buffer_size=5 * 1024 * 1024,
+                            allowed_tools=["Read"],
+                            permission_mode="default",
+                            setting_sources=[],
+                            hooks=None,
+                            agents=None,
+                            output_schema={"type": "object"},
+                        )
+
+        self.assertEqual(5 * 1024 * 1024, options.kwargs["max_buffer_size"])
 
     def test_json_response_raises_context_overload_error_on_empty_response(self) -> None:
         client = StubClaudeAgentClient(

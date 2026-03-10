@@ -1,83 +1,140 @@
 ---
-version: 1
-repo_type: python
-default_branch: main
+tracker:
+  kind: github
+  mode: project_v2
+  owner: your-org
+  repo: dev-bot
+  project:
+    scope: organization
+    number: 7
+    state_field: State
+    plan_field: Plan
+    branch_field: Agent Branch
+    pr_field: Agent PR
+    active_states: [Ready, In Progress, Rework]
+    terminal_states: [Done, Cancelled]
+    planning_states: [Backlog, Planning]
+    state_values:
+      backlog: Backlog
+      planning: Planning
+      ready: Ready
+      in_progress: In Progress
+      human_review: Human Review
+      rework: Rework
+      blocked: Blocked
+      done: Done
+      cancelled: Cancelled
+    plan_values:
+      none: Not Started
+      drafted: Drafted
+      approved: Approved
+      changes_requested: Changes Requested
+  workpad:
+    marker: "<!-- dev-bot-workpad -->"
+    mode: single_persistent_comment
+
+polling:
+  interval_ms: 15000
+  continuation_retry_ms: 1000
+  failure_backoff_ms: [1000, 5000, 15000, 60000, 300000]
+
 workspace:
-  reuse_per_issue: true
-  allow_destructive_reset_on_population_failure: false
+  root: /var/lib/dev-bot/workspaces
+  strategy: mirror_plus_worktree
+  keep_successful_workspaces: true
+  key_template: "{owner}/{repo}#{issue_number}"
+  branch_template: "agent/gh-{issue_number}-{slug}"
 
-execution:
-  planner: claude
-  implementer: codex-cli
-  verifier: claude
-  reviewer: claude
+hooks:
+  after_create: ./scripts/agent_after_create.sh
+  before_run: ./scripts/agent_before_run.sh
+  after_run: ./scripts/agent_after_run.sh
+  before_remove: ./scripts/agent_before_remove.sh
+  timeout_ms: 60000
 
-permissions:
-  default_mode: acceptEdits
-  high_risk_requires_approval: true
-  risky_commands:
-    - "alembic revision --autogenerate"
-    - "alembic upgrade head"
-    - "terraform apply"
-    - "kubectl apply"
-    - "rm -rf"
-    - "git push --force"
-  protected_paths:
-    - ".github/workflows/**"
-    - "migrations/**"
-    - "infra/prod/**"
+agent:
+  max_concurrent_agents: 3
+  max_turns: 20
+  max_stalled_ms: 300000
+  plan_required: true
+  runtime_approval: false
 
-commands:
-  setup:
-    - "pip install -r requirements.txt"
-  lint:
-    - "python -m compileall app"
-  test:
-    - "python -m compileall app"
-  build: []
-  migrate_test: []
+codex:
+  command: codex app-server
+  model: gpt-5.4
+  reasoning_effort: medium
+  summary: concise
+  approval_policy: never
+  thread_sandbox: workspace-write
+  writable_roots: ["{{ workspace.repo_dir }}"]
+  network_access: false
+  turn_timeout_ms: 3600000
+  read_timeout_ms: 5000
 
-proof_of_work:
+planning:
+  provider: claude-agent-sdk
+  enabled: true
+  cwd_source: plan_workspace
+  max_turns: 4
+  timeout_seconds: 300
+  settings_sources: [project]
+  allowed_tools: [Read, Grep, Glob]
+  skill_mode: explicit_project_filesystem
+
+verification:
   required_artifacts:
-    - "plan.json"
-    - "test_plan.json"
-    - "changed_files.json"
-    - "command_results.json"
-    - "verification_summary.json"
-    - "review_summary.json"
-  require_tests_pass: true
-  require_review_summary: true
+    - issue_snapshot.json
+    - requirement_summary.json
+    - plan.json
+    - test_plan.json
+    - changed_files.json
+    - verification.json
+    - final_summary.json
+    - run.log
+  required_checks:
+    - tests
+    - lint
+    - typecheck
 
-retry_policy:
-  max_attempts: 3
-  retry_on:
-    - "test_failure"
-    - "command_failure"
-    - "transient_tool_error"
-  no_retry_on:
-    - "policy_violation"
-    - "missing_credentials"
-    - "approval_denied"
+github:
+  auth: app
+  create_draft_pr: true
+  merge_by_bot: false
+  update_project_fields: true
+  sync_workpad: true
+  state_source_of_truth: project_v2
+  require_plan_field_approved: true
+
+discord:
+  enabled: true
+  mode: planning_and_status_surface
+  bind_command: /issue bind
+  plan_command: /plan
+  approve_plan_command: /approve-plan
+  reject_plan_command: /reject-plan
+  run_command: /run
+  retry_command: /retry
+  abort_command: /abort
+  runtime_approval: false
 ---
 
-# Workflow Contract
+You are the dev-bot implementation worker for GitHub issue-based delivery.
 
-## Goal
-この repo では最小変更で目的を達成する。
+Operating rules:
+- The source of truth is the GitHub issue, its Project v2 fields, and the persistent workpad comment.
+- Do not start implementation unless Project field `Plan` is `Approved` and Project field `State` is one of `Ready`, `In Progress`, or `Rework`.
+- Only modify files inside the current issue workspace.
+- Never push directly to the default branch.
+- Use the repository root `AGENTS.md` and repo-local skills before making substantial changes.
+- Keep changes narrowly scoped to the issue goal and acceptance criteria.
+- If you discover out-of-scope work, record it in the workpad and stop expanding scope.
+- Before finishing, update verification artifacts and produce a draft PR summary.
 
-## Planning
-- 実装前に plan を必須とする
-- `plan.json` と `test_plan.json` がなければ実装を開始しない
-
-## Implementation
-- 実装担当は Codex CLI
-- protected path の変更は approval なしでは行わない
-- PostgreSQL migration は Alembic の revision file 生成までに留める
-
-## Verification
-- 検証担当は Claude
-- テスト結果、差分、コマンド結果を要約する
-
-## Review
-- レビュー担当は Claude
-- 不要変更、protected path 変更、テスト不足を確認する
+Required workflow:
+1. Read the workpad and the issue body.
+2. Use `$issue-workpad` to sync the local picture of the issue.
+3. Use `$implementation-plan` before editing if the change is not obviously trivial.
+4. Implement only the approved plan.
+5. Use `$code-change-verification` when code, tests, or build behavior changed.
+6. Use `$draft-pr` once the branch is ready for review.
+7. Update the workpad with branch, PR, verification, and blockers before ending the run.

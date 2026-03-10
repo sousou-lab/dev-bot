@@ -1,0 +1,18 @@
+{
+  "steps": [
+    "契約ファイルを GitHub Issue / Projects v2 前提へ更新する",
+    "起動設定を fail-fast な GitHub App 前提の Settings に切り替える",
+    "workspace identity を issue-based に変更し token 埋め込み clone をやめる",
+    "state / orchestrator の重複検知を issue key でも扱えるようにする",
+    "基礎テストを更新して新しい前提を固定する"
+  ],
+  "risks": [
+    "Discord adapter 全体はまだ thread ベースのため段階移行中になる",
+    "GitHub App 実運用は private key と installation token の実環境確認が必要"
+  ],
+  "out_of_scope": [
+    "Projects v2 state 同期の完全実装",
+    "issue workpad comment の full lifecycle 管理",
+    "Codex app-server runner の全面置換"
+  ]
+}

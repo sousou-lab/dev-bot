@@ -1,0 +1,15 @@
+{
+  "unit": [
+    "config の必須 env と planning lane 条件付き必須 env を検証する",
+    "workspace path が issue key ベースで安定することを検証する",
+    "orchestrator が同一 workspace key の重複 dispatch を防ぐことを検証する",
+    "state store が issue_key を保持し artifact を従来どおり読めることを検証する"
+  ],
+  "integration": [
+    "GitHub App credential がある環境で repo cache と git credential env を確認する"
+  ],
+  "manual_checks": [
+    "Discord から bind 済み issue を再実行して同じ workspace が再利用されることを確認する",
+    "git remote に token が保存されていないことを確認する"
+  ]
+}

@@ -1,41 +1,42 @@
 # Architecture
 
-## Control Plane
-- Discord command handling
-- requirement summary
-- planning
-- test design
-- verification
-- review
-- approvals
-- orchestration state
+## Source Of Truth
+- GitHub Issues: work item 本体
+- GitHub Projects v2: canonical scheduler state
+- Discord: conversation UI / planning approval UI / status mirror
 
-## Execution Plane
-- Codex CLI non-interactive execution
-- repository-local edits
-- test and lint command execution
-- changed files detection
+## Control Plane
+- Python orchestrator が唯一の control plane
+- planning lane は Claude Agent SDK に限定する
+- execution lane は Codex app-server に統一する
+- repo-owned contract は `WORKFLOW.md` / `AGENTS.md` / Skills が担う
+
+## Runtime Model
+- workspace key: `{owner}/{repo}#{issue_number}`
+- per-issue workspace を再利用し、retry / recovery 時も同じ worktree を使う
+- 永続 source は GitHub issue workpad と filesystem artifacts
+- DB なしでも再開できる構成を優先する
 
 ## State Model
-- `draft`
-- `planned`
-- `awaiting_plan_approval`
-- `queued`
-- `running`
-- `awaiting_high_risk_approval`
-- `verifying`
-- `completed`
-- `failed`
-- `aborted`
+- `Backlog`
+- `Ready`
+- `In Progress`
+- `Human Review`
+- `Rework`
+- `Merging`
+- `Done`
+- `Blocked`
+- `Cancelled`
 
-## Artifacts
+## Required Artifacts
+- `issue_snapshot.json`
 - `requirement_summary.json`
 - `plan.json`
 - `test_plan.json`
-- `repo_profile.json`
-- `codex_run.log`
+- `verification.json`
 - `changed_files.json`
-- `command_results.json`
-- `verification_summary.json`
-- `review_summary.json`
-- `final_result.json`
+- `final_summary.json`
+- `run.log`
+- `discord_events.jsonl`
+- `workpad_updates.jsonl`
+- `runner_metadata.json`

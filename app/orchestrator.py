@@ -12,6 +12,7 @@ class WorkItem:
     thread_id: int
     repo_full_name: str
     issue: dict
+    workspace_key: str = ""
 
 
 class Orchestrator:
@@ -26,7 +27,9 @@ class Orchestrator:
         self.max_concurrency = max_concurrency
         self._queue: asyncio.Queue[WorkItem] = asyncio.Queue()
         self._running: dict[int, asyncio.Task[None]] = {}
+        self._running_keys: set[str] = set()
         self._queued_thread_ids: set[int] = set()
+        self._queued_keys: set[str] = set()
         self._dispatcher_task: asyncio.Task[None] | None = None
 
     def ensure_started(self) -> None:
@@ -35,11 +38,13 @@ class Orchestrator:
         self._dispatcher_task = asyncio.create_task(self._dispatch_loop())
 
     async def enqueue(self, item: WorkItem) -> bool:
-        if item.thread_id in self._running or item.thread_id in self._queued_thread_ids:
+        item_key = self._item_key(item)
+        if item.thread_id in self._running or item.thread_id in self._queued_thread_ids or item_key in self._running_keys or item_key in self._queued_keys:
             return False
         self.state_store.update_status(item.thread_id, "queued")
         await self._queue.put(item)
         self._queued_thread_ids.add(item.thread_id)
+        self._queued_keys.add(item_key)
         self.ensure_started()
         return True
 
@@ -58,9 +63,11 @@ class Orchestrator:
                 continue
             item = await self._queue.get()
             self._queued_thread_ids.discard(item.thread_id)
+            self._queued_keys.discard(self._item_key(item))
             self._cleanup_finished()
             task = asyncio.create_task(self._run_item(item))
             self._running[item.thread_id] = task
+            self._running_keys.add(self._item_key(item))
 
     async def _run_item(self, item: WorkItem) -> None:
         try:
@@ -75,11 +82,15 @@ class Orchestrator:
             self.state_store.update_status(item.thread_id, "failed")
         finally:
             self._running.pop(item.thread_id, None)
+            self._running_keys.discard(self._item_key(item))
 
     def _cleanup_finished(self) -> None:
         stale = [thread_id for thread_id, task in self._running.items() if task.done()]
         for thread_id in stale:
             self._running.pop(thread_id, None)
+
+    def _item_key(self, item: WorkItem) -> str:
+        return item.workspace_key or f"{item.repo_full_name}#{item.issue.get('number', item.thread_id)}"
 
     async def restore(self, items: list[WorkItem]) -> None:
         for item in items:

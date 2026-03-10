@@ -77,3 +77,13 @@ class FileStateStoreTests(unittest.TestCase):
         history = self.store.load_artifact(1, "activity_history.json")
         self.assertEqual(1, len(history["items"]))
         self.assertEqual("workspace", history["items"][0]["phase"])
+
+    def test_bind_issue_persists_issue_key(self) -> None:
+        issue_key = self.store.bind_issue(1, "owner/repo", 42)
+
+        meta = self.store.load_meta(1)
+
+        self.assertEqual("owner/repo#42", issue_key)
+        self.assertEqual("owner/repo#42", meta["issue_key"])
+        self.assertEqual("owner/repo", meta["github_repo"])
+        self.assertEqual("42", meta["issue_number"])

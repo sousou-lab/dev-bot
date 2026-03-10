@@ -4,3 +4,4 @@ python-dotenv
 PyYAML
 aiofiles
 claude-agent-sdk
+pydantic>=2,<3

@@ -11,6 +11,7 @@ from discord import app_commands
 
 from app.approvals import ApprovalCoordinator
 from app.agent_sdk_client import (
+    AgentBufferOverflowError,
     AgentContextOverloadError,
     AgentForbiddenToolError,
     AgentJsonResponseError,
@@ -67,7 +68,15 @@ class DevBotClient(discord.Client):
         self.state_store = state_store
         self.requirements_agent = RequirementsAgent(settings=settings)
         self.planning_agent = PlanningAgent(settings=settings)
-        self.github_client = GitHubIssueClient(settings.github_token)
+        self.github_client = GitHubIssueClient(
+            settings.github_token,
+            app_id=getattr(settings, "github_app_id", ""),
+            private_key_path=getattr(settings, "github_app_private_key_path", ""),
+            installation_id=getattr(settings, "github_app_installation_id", ""),
+            project_id=getattr(settings, "github_project_id", ""),
+            project_state_field_id=getattr(settings, "github_project_state_field_id", ""),
+            project_state_option_ids=getattr(settings, "github_project_state_option_ids", ""),
+        )
         self.process_registry = ProcessRegistry(settings.runs_root)
         self.approval_coordinator = ApprovalCoordinator(state_store)
         self.pipeline = DevelopmentPipeline(
@@ -104,6 +113,7 @@ class DevBotClient(discord.Client):
             self.tree.add_command(command)
 
         for name, description, callback in (
+            ("repos", "アクセス可能な repository 一覧を表示します", self.repos_command),
             ("status", "現在の状態を表示します", self.status_command),
             ("issue", "作成済みIssueを表示します", self.issue_command),
             ("pr", "作成済みPRを表示します", self.pr_command),
@@ -365,6 +375,21 @@ class DevBotClient(discord.Client):
     async def run_command(self, interaction: discord.Interaction, repo: str | None = None) -> None:
         await self._start_run(interaction, repo)
 
+    async def repos_command(self, interaction: discord.Interaction, query: str | None = None) -> None:
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            repos = await asyncio.to_thread(self._list_repositories_for_display, query or "")
+        except Exception as exc:
+            await self._send_followup_text(interaction, f"repository 一覧の取得に失敗しました: `{exc}`", ephemeral=True)
+            return
+        if not repos:
+            message = "表示できる repository はありません。"
+            if query:
+                message = f"`{query}` に一致する repository はありません。"
+            await self._send_followup_text(interaction, message, ephemeral=True)
+            return
+        await self._send_followup_text(interaction, self._format_repo_list_message(repos, query or ""), ephemeral=True)
+
     async def status_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
@@ -612,14 +637,17 @@ class DevBotClient(discord.Client):
                 asyncio.to_thread(self.github_client.suggest_repositories, current, 25),
                 timeout=1.5,
             )
-        except Exception:
-            return []
+        except Exception as exc:
+            print(f"[repo_autocomplete] GitHub repository lookup failed: {exc}")
+            fallback = self.github_client.fallback_repositories()
+            return [app_commands.Choice(name=repo, value=repo) for repo in fallback[:25]]
         return [app_commands.Choice(name=repo, value=repo) for repo in repos]
 
     async def _warm_repo_autocomplete_cache(self) -> None:
         try:
             await asyncio.to_thread(self.github_client.warm_repository_cache)
-        except Exception:
+        except Exception as exc:
+            print(f"[repo_autocomplete] cache warm failed: {exc}")
             return
 
     async def _generate_plan(self, interaction: discord.Interaction, repo: str, *, alias_used: bool) -> None:
@@ -674,6 +702,18 @@ class DevBotClient(discord.Client):
                         "failure_type": "context_overload",
                         "peak_tokens": exc.peak_tokens,
                         "read_count": exc.read_count,
+                    }
+                )
+                stderr = exc.stderr
+            elif isinstance(exc, AgentBufferOverflowError):
+                details.update(
+                    {
+                        "prompt_kind": exc.prompt_kind or "unknown",
+                        "session_id": exc.session_id or "",
+                        "failure_type": "buffer_overflow",
+                        "max_buffer_size": exc.max_buffer_size,
+                        "likely_source": exc.likely_source,
+                        "source_detail": exc.source_detail,
                     }
                 )
                 stderr = exc.stderr
@@ -739,10 +779,26 @@ class DevBotClient(discord.Client):
         )
         self.state_store.write_artifact(thread_id, "planning_progress.json", {"status": "completed", "phase": "done"})
         prefix = "互換コマンド `/confirm` を `/plan` として扱いました。\n\n" if alias_used else ""
+        plan_message = prefix + self._format_plan_message(repo, artifacts["plan"], artifacts["test_plan"])
+        try:
+            issue = await self._enqueue_run_for_thread(thread_id=thread_id, channel=interaction.channel, repo_full_name=repo)
+        except (RuntimeError, ValueError) as exc:
+            await self._send_followup_text(
+                interaction,
+                plan_message + f"\n\n自動 `/run` の開始に失敗しました: `{exc}`",
+            )
+            return
+
         await self._send_followup_text(
             interaction,
-            prefix + self._format_plan_message(repo, artifacts["plan"], artifacts["test_plan"]),
+            plan_message
+            + "\n\n自動で `/run` を開始しました。"
+            + f"\n- Repo: `{repo}`"
+            + f"\n- Issue: #{issue['number']}"
+            + f"\n- URL: {issue['url']}",
         )
+        if isinstance(interaction.channel, discord.Thread):
+            await self._maybe_post_pending_approval(interaction.channel)
 
     async def _start_run(self, interaction: discord.Interaction, repo: str | None) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
@@ -768,35 +824,14 @@ class DevBotClient(discord.Client):
             return
 
         await interaction.response.defer(thinking=True)
-        if not isinstance(issue, dict) or not issue:
-            thread_url = interaction.channel.jump_url if isinstance(interaction.channel, discord.Thread) else ""
-            title = build_issue_title(summary)
-            body = build_issue_body(summary, thread_url)
-            try:
-                created = await asyncio.to_thread(
-                    self.github_client.create_issue,
-                    repo_full_name=repo_full_name,
-                    title=title,
-                    body=body,
-                )
-            except Exception as exc:
-                await self._send_followup_text(interaction, f"Issue 作成に失敗しました: `{exc}`", ephemeral=True)
-                return
-            issue = {
-                "repo_full_name": created.repo_full_name,
-                "number": created.number,
-                "title": created.title,
-                "body": created.body,
-                "url": created.url,
-            }
-            self.state_store.write_artifact(thread_id, "issue.json", issue)
-
-        self.state_store.update_meta(thread_id, github_repo=repo_full_name, issue_number=str(issue["number"]))
-        started = await self.orchestrator.enqueue(
-            WorkItem(thread_id=thread_id, repo_full_name=repo_full_name, issue=issue)
-        )
-        if not started:
-            await self._send_followup_text(interaction, "パイプラインの起動に失敗しました。", ephemeral=True)
+        try:
+            issue = await self._enqueue_run_for_thread(
+                thread_id=thread_id,
+                channel=interaction.channel,
+                repo_full_name=repo_full_name,
+            )
+        except (RuntimeError, ValueError) as exc:
+            await self._send_followup_text(interaction, str(exc), ephemeral=True)
             return
         await self._send_followup_text(
             interaction,
@@ -807,6 +842,50 @@ class DevBotClient(discord.Client):
         )
         if isinstance(interaction.channel, discord.Thread):
             await self._maybe_post_pending_approval(interaction.channel)
+
+    async def _enqueue_run_for_thread(
+        self,
+        *,
+        thread_id: int,
+        channel: discord.abc.GuildChannel | discord.Thread | None,
+        repo_full_name: str,
+    ) -> dict[str, Any]:
+        summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
+        plan = self.state_store.load_artifact(thread_id, "plan.json")
+        test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
+        if not isinstance(summary, dict) or not isinstance(plan, dict) or not isinstance(test_plan, dict) or not plan or not test_plan:
+            raise ValueError("先に `/plan repo:owner/repo` を実行してください。")
+
+        issue = self.state_store.load_artifact(thread_id, "issue.json")
+        if not isinstance(issue, dict) or not issue:
+            thread_url = channel.jump_url if isinstance(channel, discord.Thread) else ""
+            title = build_issue_title(summary)
+            body = build_issue_body(summary, thread_url)
+            try:
+                created = await asyncio.to_thread(
+                    self.github_client.create_issue,
+                    repo_full_name=repo_full_name,
+                    title=title,
+                    body=body,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Issue 作成に失敗しました: `{exc}`") from exc
+            issue = {
+                "repo_full_name": created.repo_full_name,
+                "number": created.number,
+                "title": created.title,
+                "body": created.body,
+                "url": created.url,
+            }
+            self.state_store.write_artifact(thread_id, "issue.json", issue)
+
+        workspace_key = self.state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
+        started = await self.orchestrator.enqueue(
+            WorkItem(thread_id=thread_id, repo_full_name=repo_full_name, issue=issue, workspace_key=workspace_key)
+        )
+        if not started:
+            raise RuntimeError("パイプラインの起動に失敗しました。")
+        return issue
 
     def _build_plan_artifacts(self, repo: str, thread_id: int, summary: dict[str, Any]) -> dict[str, Any]:
         planning_workspace = self.pipeline.workspace_manager.prepare_plan_workspace(repo, thread_id)
@@ -886,7 +965,7 @@ class DevBotClient(discord.Client):
             f"{test_cases}\n\n"
             "Risks\n"
             f"{risks}\n\n"
-            "問題なければ `/run` を実行してください。"
+            "続けて実装 run を開始します。"
         )
 
     def _clear_execution_artifacts(self, thread_id: int) -> None:
@@ -941,7 +1020,12 @@ class DevBotClient(discord.Client):
             if resolution != "resolved" and isinstance(issue, dict) and issue and repo_full_name:
                 self.state_store.update_status(thread_id, "queued")
                 await self.orchestrator.enqueue(
-                    WorkItem(thread_id=thread_id, repo_full_name=repo_full_name, issue=issue)
+                    WorkItem(
+                        thread_id=thread_id,
+                        repo_full_name=repo_full_name,
+                        issue=issue,
+                        workspace_key=f"{repo_full_name}#{issue.get('number')}",
+                    )
                 )
                 await interaction.response.send_message("高リスク操作を承認しました。run を再キューしました。", ephemeral=True)
                 return
@@ -982,7 +1066,14 @@ class DevBotClient(discord.Client):
                     await asyncio.to_thread(self.process_registry.terminate, thread_id)
                     self.process_registry.unregister(thread_id)
                 self.state_store.update_status(thread_id, "queued")
-            items.append(WorkItem(thread_id=thread_id, repo_full_name=repo_full_name, issue=issue))
+            items.append(
+                WorkItem(
+                    thread_id=thread_id,
+                    repo_full_name=repo_full_name,
+                    issue=issue,
+                    workspace_key=f"{repo_full_name}#{issue.get('number')}",
+                )
+            )
         if items:
             await self.orchestrator.restore(items)
 
