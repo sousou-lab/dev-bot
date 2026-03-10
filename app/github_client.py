@@ -49,8 +49,29 @@ class GitHubIssueClient:
             "repo_full_name": repo_full_name,
         }
 
+    def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict:
+        try:
+            repo = self.client.get_repo(repo_full_name)
+            issue = repo.get_issue(number=issue_number)
+            comment = issue.create_comment(body)
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub comment creation failed: {exc.data}") from exc
+        return {"id": comment.id, "url": comment.html_url}
+
     def suggest_repositories(self, query: str, limit: int = 25) -> list[str]:
         repos = self._list_accessible_repositories()
+        return self._filter_repositories(repos, query, limit)
+
+    def suggest_cached_repositories(self, query: str, limit: int = 25) -> list[str]:
+        return self._filter_repositories(self.cached_repositories(), query, limit)
+
+    def cached_repositories(self) -> list[str]:
+        return list(self._repo_cache)
+
+    def warm_repository_cache(self) -> list[str]:
+        return self._list_accessible_repositories()
+
+    def _filter_repositories(self, repos: list[str], query: str, limit: int) -> list[str]:
         needle = query.strip().lower()
         if needle:
             starts = [repo for repo in repos if repo.lower().startswith(needle)]

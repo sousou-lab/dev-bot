@@ -52,13 +52,7 @@ class RequirementsFlow:
             body=body,
             status="ready_for_confirmation",
             artifacts={
-                "summary": {
-                    "change_type": answers["change_type"],
-                    "completion": answers["completion"],
-                    "out_of_scope": answers["out_of_scope"],
-                    "users": answers["users"],
-                    "constraints": answers["constraints"],
-                }
+                "summary": self._build_planning_summary(answers)
             },
         )
 
@@ -165,3 +159,20 @@ class RequirementsFlow:
                 f"- 制約: {answers['constraints']}",
             ]
         )
+
+    def _build_planning_summary(self, answers: dict[str, str]) -> dict[str, object]:
+        background_parts = [answers["change_type"], answers["users"]]
+        constraint_items = [answers["constraints"]] if answers["constraints"] else []
+        open_questions: list[str] = []
+        if not answers["completion"]:
+            open_questions.append("完了条件が未確定です。")
+        return {
+            "background": " / ".join(part for part in background_parts if part),
+            "goal": answers["completion"] or answers["change_type"],
+            "in_scope": [answers["completion"]] if answers["completion"] else ([answers["change_type"]] if answers["change_type"] else []),
+            "out_of_scope": [answers["out_of_scope"]] if answers["out_of_scope"] else [],
+            "acceptance_criteria": [answers["completion"]] if answers["completion"] else [],
+            "constraints": constraint_items,
+            "test_focus": ([f"{answers['users']} 向けの期待動作"] if answers["users"] else []),
+            "open_questions": open_questions,
+        }

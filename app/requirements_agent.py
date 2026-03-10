@@ -62,30 +62,26 @@ REQUIREMENTS_SCHEMA = {
         },
         "reply": {"type": "string"},
         "summary": {
-            "type": "object",
-            "properties": {
-                "background": {"type": "string"},
-                "goal": {"type": "string"},
-                "in_scope": {"type": "array", "items": {"type": "string"}},
-                "out_of_scope": {"type": "array", "items": {"type": "string"}},
-                "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                "constraints": {"type": "array", "items": {"type": "string"}},
-                "test_focus": {"type": "array", "items": {"type": "string"}},
-                "open_questions": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": [
-                "background",
-                "goal",
-                "in_scope",
-                "out_of_scope",
-                "acceptance_criteria",
-                "constraints",
-                "test_focus",
-                "open_questions",
-            ],
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "background": {"type": "string"},
+                        "goal": {"type": "string"},
+                        "in_scope": {"type": "array", "items": {"type": "string"}},
+                        "out_of_scope": {"type": "array", "items": {"type": "string"}},
+                        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                        "constraints": {"type": "array", "items": {"type": "string"}},
+                        "test_focus": {"type": "array", "items": {"type": "string"}},
+                        "open_questions": {"type": "array", "items": {"type": "string"}}
+                    }
+                },
+                {"type": "string"},
+                {"type": "null"}
+            ]
         },
     },
-    "required": ["status", "reply", "summary"],
+    "required": ["status", "reply"],
 }
 
 
@@ -100,7 +96,7 @@ class RequirementsAgent:
             return RequirementReply(body="会話履歴が見つかりません。", status="requirements_error")
 
         try:
-            payload = self._query_model(messages)
+            payload = self._normalize_payload(self._query_model(messages))
             status = payload.get("status", "questioning")
             body = self._build_body(payload).strip()
             if not body:
@@ -171,14 +167,75 @@ class RequirementsAgent:
                 + "\n\n".join(_format_reference_material(item) for item in reference_materials)
                 + "\n\n上記の参考資料だけを使ってよく、一般検索はしてはいけません。"
             )
-        return client.json_response(
-            SYSTEM_PROMPT,
-            prompt,
-            max_turns=2,
-            allowed_tools=[],
-            permission_mode="default",
-            output_schema=REQUIREMENTS_SCHEMA,
+        try:
+            return client.json_response(
+                SYSTEM_PROMPT,
+                prompt,
+                max_turns=1,
+                allowed_tools=[],
+                permission_mode="default",
+                output_schema=REQUIREMENTS_SCHEMA,
+            )
+        except Exception:
+            raw = client.run_text(
+                SYSTEM_PROMPT,
+                (
+                    f"{prompt}\n\n"
+                    "必ず JSON オブジェクトだけを返してください。"
+                    " Markdown、前置き、説明文は禁止です。"
+                ),
+                max_turns=1,
+                allowed_tools=[],
+                permission_mode="default",
+                output_schema=None,
+            )
+            text = raw.result.strip()
+            if not text:
+                raise RuntimeError("Requirements agent returned an empty response.")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                extracted = _extract_json_object(text)
+                if extracted is not None:
+                    return extracted
+                raise RuntimeError(f"Requirements agent did not return valid JSON. Raw response: {text[:500]!r}")
+
+    def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        normalized["status"] = (
+            "ready_for_confirmation"
+            if str(normalized.get("status", "")).strip() == "ready_for_confirmation"
+            else "questioning"
         )
+        normalized["reply"] = str(normalized.get("reply", "")).strip()
+        normalized["summary"] = self._normalize_summary(normalized.get("summary"))
+        return normalized
+
+    def _normalize_summary(self, summary: object) -> dict[str, Any]:
+        if not isinstance(summary, dict):
+            summary = {}
+        return {
+            "background": self._as_string(summary.get("background")),
+            "goal": self._as_string(summary.get("goal")),
+            "in_scope": self._as_string_list(summary.get("in_scope")),
+            "out_of_scope": self._as_string_list(summary.get("out_of_scope")),
+            "acceptance_criteria": self._as_string_list(summary.get("acceptance_criteria")),
+            "constraints": self._as_string_list(summary.get("constraints")),
+            "test_focus": self._as_string_list(summary.get("test_focus")),
+            "open_questions": self._as_string_list(summary.get("open_questions")),
+        }
+
+    def _as_string(self, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _as_string_list(self, value: object) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
 
     def _build_body(self, payload: dict) -> str:
         status = payload.get("status", "questioning")
@@ -258,3 +315,17 @@ def _format_reference_material(item: dict[str, str]) -> str:
         "  status: ok\n"
         f"  excerpt: {item.get('content')}"
     )
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None

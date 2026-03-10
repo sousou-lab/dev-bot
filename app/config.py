@@ -3,7 +3,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - optional in bare test env
+    def load_dotenv() -> None:
+        return None
 
 
 load_dotenv()
@@ -19,6 +23,9 @@ class Settings:
     workspace_root: str
     runs_root: str
     max_implementation_iterations: int
+    max_concurrent_runs: int
+    codex_bin: str
+    approval_timeout_seconds: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -31,6 +38,9 @@ class Settings:
             workspace_root=os.getenv("WORKSPACE_ROOT", "/tmp/dev-bot-workspaces"),
             runs_root=os.getenv("RUNS_ROOT", "./runs"),
             max_implementation_iterations=int(os.getenv("MAX_IMPLEMENTATION_ITERATIONS", "5")),
+            max_concurrent_runs=int(os.getenv("MAX_CONCURRENT_RUNS", "5")),
+            codex_bin=os.getenv("CODEX_BIN", "codex"),
+            approval_timeout_seconds=int(os.getenv("APPROVAL_TIMEOUT_SECONDS", "900")),
         )
 
 
