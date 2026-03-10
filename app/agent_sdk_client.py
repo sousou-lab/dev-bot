@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -29,6 +30,119 @@ class AgentDebugInfo:
     preflight: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class AgentJsonEnvelope:
+    payload: dict[str, Any]
+    session_id: str | None = None
+    stderr: list[str] | None = None
+
+
+class AgentJsonResponseError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_response: str = "",
+        stderr: list[str] | None = None,
+        session_id: str | None = None,
+        prompt_kind: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
+        self.stderr = stderr or []
+        self.session_id = session_id
+        self.prompt_kind = prompt_kind
+
+
+class AgentForbiddenToolError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool_name: str = "",
+        reason: str = "",
+        stderr: list[str] | None = None,
+        session_id: str | None = None,
+        prompt_kind: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.tool_name = tool_name
+        self.reason = reason
+        self.stderr = stderr or []
+        self.session_id = session_id
+        self.prompt_kind = prompt_kind
+
+
+class AgentTimeoutError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stderr: list[str] | None = None,
+        session_id: str | None = None,
+        prompt_kind: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stderr = stderr or []
+        self.session_id = session_id
+        self.prompt_kind = prompt_kind
+
+
+class AgentRateLimitError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stderr: list[str] | None = None,
+        session_id: str | None = None,
+        prompt_kind: str | None = None,
+        request_id: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.stderr = stderr or []
+        self.session_id = session_id
+        self.prompt_kind = prompt_kind
+        self.request_id = request_id
+
+
+class AgentOversizedReadError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stderr: list[str] | None = None,
+        session_id: str | None = None,
+        prompt_kind: str | None = None,
+        observed_tokens: str = "",
+        max_tokens: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.stderr = stderr or []
+        self.session_id = session_id
+        self.prompt_kind = prompt_kind
+        self.observed_tokens = observed_tokens
+        self.max_tokens = max_tokens
+
+
+class AgentContextOverloadError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stderr: list[str] | None = None,
+        session_id: str | None = None,
+        prompt_kind: str | None = None,
+        peak_tokens: str = "",
+        read_count: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.stderr = stderr or []
+        self.session_id = session_id
+        self.prompt_kind = prompt_kind
+        self.peak_tokens = peak_tokens
+        self.read_count = read_count
+
+
 class ClaudeAgentClient:
     def __init__(self, api_key: str | None = None, timeout_seconds: float | None = 90) -> None:
         self.api_key = api_key
@@ -46,7 +160,36 @@ class ClaudeAgentClient:
         hooks: dict[str, list[Any]] | None = None,
         agents: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
+        prompt_kind: str | None = None,
     ) -> dict:
+        return self.json_response_with_meta(
+            system,
+            prompt,
+            cwd=cwd,
+            max_turns=max_turns,
+            allowed_tools=allowed_tools,
+            permission_mode=permission_mode,
+            setting_sources=setting_sources,
+            hooks=hooks,
+            agents=agents,
+            output_schema=output_schema,
+            prompt_kind=prompt_kind,
+        ).payload
+
+    def json_response_with_meta(
+        self,
+        system: str | dict[str, Any],
+        prompt: str,
+        cwd: str | None = None,
+        max_turns: int = 1,
+        allowed_tools: list[str] | None = None,
+        permission_mode: str | None = None,
+        setting_sources: list[str] | None = None,
+        hooks: dict[str, list[Any]] | None = None,
+        agents: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        prompt_kind: str | None = None,
+    ) -> AgentJsonEnvelope:
         result = self.run_text(
             system=system,
             prompt=prompt,
@@ -58,17 +201,19 @@ class ClaudeAgentClient:
             hooks=hooks,
             agents=agents,
             output_schema=output_schema or {"type": "object"},
+            prompt_kind=prompt_kind,
         )
-        if isinstance(result.structured_output, dict):
-            return result.structured_output
-        text = result.result.strip()
-        if not text:
-            retry_result = self.run_text(
+        prefetched_stderr: list[str] = []
+        self._raise_for_oversized_read(result, prompt_kind=prompt_kind)
+        forbidden_tool = _extract_forbidden_tool_attempt(result.stderr or [])
+        if forbidden_tool is not None and _should_retry_forbidden_tool(prompt_kind=prompt_kind, tool_name=forbidden_tool[0]):
+            prefetched_stderr = list(result.stderr or [])
+            result = self.run_text(
                 system=system,
-                prompt=(
-                    f"{prompt}\n\n"
-                    "必ずJSONオブジェクトだけを返してください。"
-                    " 前置き・説明・Markdownコードブロックは禁止です。"
+                prompt=_build_json_retry_prompt(
+                    prompt,
+                    prompt_kind=prompt_kind,
+                    forbidden_tool=forbidden_tool[0],
                 ),
                 cwd=cwd,
                 max_turns=max_turns,
@@ -77,24 +222,161 @@ class ClaudeAgentClient:
                 setting_sources=setting_sources,
                 hooks=hooks,
                 agents=agents,
-                output_schema=None,
+                output_schema=output_schema or {"type": "object"},
+                prompt_kind=prompt_kind,
             )
+            self._raise_for_oversized_read(result, prompt_kind=prompt_kind)
+        self._raise_for_forbidden_tool(result, prompt_kind=prompt_kind)
+        retry_result: AgentResult | None = None
+        result_stderr = prefetched_stderr + list(result.stderr or [])
+        if isinstance(result.structured_output, dict):
+            return AgentJsonEnvelope(
+                payload=result.structured_output,
+                session_id=_coerce_session_id(result.session_id),
+                stderr=result_stderr,
+            )
+        text = result.result.strip()
+        if not text:
+            retry_result = self.run_text(
+                system=system,
+                prompt=_build_json_retry_prompt(prompt, prompt_kind=prompt_kind),
+                cwd=cwd,
+                max_turns=max_turns,
+                allowed_tools=allowed_tools,
+                permission_mode=permission_mode,
+                setting_sources=setting_sources,
+                hooks=hooks,
+                agents=agents,
+                output_schema=None,
+                prompt_kind=prompt_kind,
+            )
+            self._raise_for_oversized_read(retry_result, prompt_kind=prompt_kind)
+            self._raise_for_forbidden_tool(retry_result, prompt_kind=prompt_kind)
             text = retry_result.result.strip()
             if isinstance(retry_result.structured_output, dict):
-                return retry_result.structured_output
+                return AgentJsonEnvelope(
+                    payload=retry_result.structured_output,
+                    session_id=_coerce_session_id(retry_result.session_id),
+                    stderr=result_stderr + list(retry_result.stderr or []),
+                )
             if not text:
+                combined_stderr = result_stderr + list(retry_result.stderr or [])
+                context_overload = _extract_context_overload_error(combined_stderr)
+                if context_overload is not None:
+                    peak_tokens, read_count = context_overload
+                    raise AgentContextOverloadError(
+                        "Claude Agent SDK likely exhausted context after repeated Read operations and returned no JSON.",
+                        stderr=combined_stderr,
+                        session_id=retry_result.session_id or result.session_id,
+                        prompt_kind=prompt_kind,
+                        peak_tokens=peak_tokens,
+                        read_count=read_count,
+                    )
                 detail = "\n".join((result.stderr or [])[-20:] + (retry_result.stderr or [])[-20:]).strip()
                 message = "Claude Agent SDK returned an empty response when JSON was expected."
                 if detail:
                     message = f"{message} stderr:\n{detail}"
-                raise RuntimeError(message)
+                raise AgentJsonResponseError(
+                    message,
+                    raw_response=text[:500],
+                    stderr=(result.stderr or []) + (retry_result.stderr or []),
+                    session_id=retry_result.session_id or result.session_id,
+                    prompt_kind=prompt_kind,
+                )
         try:
-            return json.loads(text)
+            return AgentJsonEnvelope(
+                payload=json.loads(text),
+                session_id=_coerce_session_id(retry_result.session_id if retry_result else result.session_id),
+                stderr=(result_stderr + list(retry_result.stderr or [])) if retry_result else result_stderr,
+            )
         except json.JSONDecodeError:
             extracted = _extract_json_object(text)
             if extracted is not None:
-                return extracted
-            raise RuntimeError(f"Claude Agent SDK did not return valid JSON. Raw response: {text[:500]!r}")
+                return AgentJsonEnvelope(
+                    payload=extracted,
+                    session_id=_coerce_session_id(retry_result.session_id if retry_result else result.session_id),
+                    stderr=(result_stderr + list(retry_result.stderr or [])) if retry_result else result_stderr,
+                )
+            retry_result = self.run_text(
+                system=system,
+                prompt=_build_json_retry_prompt(prompt, prompt_kind=prompt_kind),
+                cwd=cwd,
+                max_turns=max_turns,
+                allowed_tools=allowed_tools,
+                permission_mode=permission_mode,
+                setting_sources=setting_sources,
+                hooks=hooks,
+                agents=agents,
+                output_schema=None,
+                prompt_kind=prompt_kind,
+            )
+            self._raise_for_oversized_read(retry_result, prompt_kind=prompt_kind)
+            self._raise_for_forbidden_tool(retry_result, prompt_kind=prompt_kind)
+            text = retry_result.result.strip()
+            if isinstance(retry_result.structured_output, dict):
+                return AgentJsonEnvelope(
+                    payload=retry_result.structured_output,
+                    session_id=_coerce_session_id(retry_result.session_id),
+                    stderr=result_stderr + list(retry_result.stderr or []),
+                )
+            if text:
+                try:
+                    return AgentJsonEnvelope(
+                        payload=json.loads(text),
+                        session_id=_coerce_session_id(retry_result.session_id),
+                        stderr=result_stderr + list(retry_result.stderr or []),
+                    )
+                except json.JSONDecodeError:
+                    extracted = _extract_json_object(text)
+                    if extracted is not None:
+                        return AgentJsonEnvelope(
+                            payload=extracted,
+                            session_id=_coerce_session_id(retry_result.session_id),
+                            stderr=result_stderr + list(retry_result.stderr or []),
+                        )
+            detail = "\n".join(result_stderr[-20:] + ((retry_result.stderr or [])[-20:] if retry_result else [])).strip()
+            message = f"Claude Agent SDK did not return valid JSON. Raw response: {text[:500]!r}"
+            if detail:
+                message = f"{message} stderr:\n{detail}"
+            raise AgentJsonResponseError(
+                message,
+                raw_response=text[:500],
+                stderr=result_stderr + list(retry_result.stderr or []),
+                session_id=retry_result.session_id or result.session_id,
+                prompt_kind=prompt_kind,
+            )
+
+    def _raise_for_forbidden_tool(self, result: AgentResult, *, prompt_kind: str | None) -> None:
+        denied = _extract_forbidden_tool_attempt(result.stderr or [])
+        if denied is None:
+            return
+        tool_name, reason = denied
+        message = f"Claude Agent SDK attempted a forbidden tool: `{tool_name}`."
+        if reason:
+            message = f"{message} reason: {reason}"
+        raise AgentForbiddenToolError(
+            message,
+            tool_name=tool_name,
+            reason=reason,
+            stderr=result.stderr,
+            session_id=result.session_id,
+            prompt_kind=prompt_kind,
+        )
+
+    def _raise_for_oversized_read(self, result: AgentResult, *, prompt_kind: str | None) -> None:
+        oversized = _extract_oversized_read_error(result.stderr or [])
+        if oversized is None:
+            return
+        observed_tokens, max_tokens = oversized
+        message = "Claude Agent SDK attempted to read a file that exceeded the maximum token limit."
+        raise AgentOversizedReadError(
+            message,
+            stderr=result.stderr,
+            session_id=result.session_id,
+            prompt_kind=prompt_kind,
+            observed_tokens=observed_tokens,
+            max_tokens=max_tokens,
+        )
 
     def persistent_json_responses(
         self,
@@ -136,6 +418,7 @@ class ClaudeAgentClient:
         hooks: dict[str, list[Any]] | None = None,
         agents: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
+        prompt_kind: str | None = None,
     ) -> AgentResult:
         return _run_async(
             _query_text(
@@ -151,6 +434,7 @@ class ClaudeAgentClient:
                 hooks,
                 agents,
                 output_schema,
+                prompt_kind,
             )
         )
 
@@ -190,6 +474,7 @@ async def _query_text(
     hooks: dict[str, list[Any]] | None,
     agents: dict[str, Any] | None,
     output_schema: dict[str, Any] | None,
+    prompt_kind: str | None,
 ) -> AgentResult:
     try:
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, query
@@ -226,7 +511,7 @@ async def _query_text(
                     result=message.result or "\n".join(assistant_chunks).strip(),
                     structured_output=message.structured_output,
                     stderr=stderr_lines,
-                    session_id=message.session_id,
+                    session_id=_coerce_session_id(message.session_id),
                     total_cost_usd=message.total_cost_usd,
                     usage=message.usage,
                 )
@@ -238,12 +523,38 @@ async def _query_text(
         if timeout_seconds is None:
             return await _collect_result()
         return await asyncio.wait_for(_collect_result(), timeout=timeout_seconds)
+    except RuntimeError as exc:
+        usage_limit_message = _extract_usage_limit_message(str(exc))
+        if usage_limit_message is not None:
+            raise AgentRateLimitError(
+                f"Claude Agent SDK hit an account usage limit before returning a final result. {usage_limit_message}",
+                stderr=stderr_lines,
+                prompt_kind=prompt_kind,
+                request_id="",
+            ) from exc
+        raise
     except asyncio.TimeoutError as exc:
         detail = "\n".join(stderr_lines[-20:]).strip()
+        rate_limit = _extract_rate_limit_error(stderr_lines)
+        if rate_limit is not None:
+            request_id, rate_limit_message = rate_limit
+            message = "Claude Agent SDK hit an API rate limit before returning a final result."
+            if rate_limit_message:
+                message = f"{message} {rate_limit_message}"
+            raise AgentRateLimitError(
+                message,
+                stderr=stderr_lines,
+                prompt_kind=prompt_kind,
+                request_id=request_id,
+            ) from exc
         message = "Claude Agent SDK timed out before returning a final result."
         if detail:
             message = f"{message} stderr:\n{detail}"
-        raise RuntimeError(message) from exc
+        raise AgentTimeoutError(
+            message,
+            stderr=stderr_lines,
+            prompt_kind=prompt_kind,
+        ) from exc
 
 
 async def _persistent_json_responses(
@@ -302,6 +613,112 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
             continue
         if isinstance(value, dict):
             return value
+    return None
+
+
+def _build_json_retry_prompt(prompt: str, *, prompt_kind: str | None = None, forbidden_tool: str = "") -> str:
+    extra = ""
+    if prompt_kind in {"plan", "test_plan"}:
+        extra = (
+            "\n追加のツール探索は禁止です。"
+            "\n新しい情報を探しに行かず、既に取得済みの要件と読取結果だけで完結してください。"
+            "\n不明点は assumptions / risks / regression_risks に残してください。"
+            "\nWrite / Edit / Bash は禁止です。ファイル保存は行わず、最終メッセージで JSON オブジェクトだけを返してください。"
+        )
+    forbidden_note = ""
+    if forbidden_tool:
+        forbidden_note = f"\n直前に禁止ツール `{forbidden_tool}` を使おうとしたため、その操作は中止されました。"
+    return (
+        f"{prompt}\n\n"
+        "前の応答は無効です。理由: JSON オブジェクトではありませんでした。\n"
+        "次は schema に一致する JSON オブジェクトのみを返してください。\n"
+        "説明文、前置き、思考過程、Markdown コードブロックは禁止です。\n"
+        "ツールを使った後でも最終メッセージは JSON のみです。"
+        f"{forbidden_note}"
+        f"{extra}"
+    )
+
+
+def _should_retry_forbidden_tool(*, prompt_kind: str | None, tool_name: str) -> bool:
+    return prompt_kind in {"plan", "test_plan"} and tool_name in {"Write", "Edit", "Bash"}
+
+
+def _extract_forbidden_tool_attempt(stderr_lines: list[str]) -> tuple[str, str] | None:
+    tool_name = ""
+    reason = ""
+    reason_pattern = re.compile(r"permissionDecision: deny \(reason: (?P<reason>.+?)\)")
+    denied_tool_pattern = re.compile(r"Hook denied tool use for (?P<tool>[A-Za-z0-9_-]+)")
+    permission_denied_pattern = re.compile(r"(?P<tool>[A-Za-z0-9_-]+) tool permission denied")
+    for line in stderr_lines:
+        if not reason:
+            match = reason_pattern.search(line)
+            if match:
+                reason = match.group("reason").strip()
+        if not tool_name:
+            match = denied_tool_pattern.search(line)
+            if match:
+                tool_name = match.group("tool").strip()
+                continue
+            match = permission_denied_pattern.search(line)
+            if match:
+                tool_name = match.group("tool").strip()
+    if not tool_name and not reason:
+        return None
+    return tool_name, reason
+
+
+def _extract_rate_limit_error(stderr_lines: list[str]) -> tuple[str, str] | None:
+    request_id = ""
+    message = ""
+    request_id_pattern = re.compile(r'"request_id":"(?P<request_id>[^"]+)"')
+    message_pattern = re.compile(r'"message":"(?P<message>[^"]+)"')
+    for line in stderr_lines:
+        if "rate_limit_error" not in line and "429" not in line:
+            continue
+        if not request_id:
+            match = request_id_pattern.search(line)
+            if match:
+                request_id = match.group("request_id").strip()
+        if not message:
+            match = message_pattern.search(line)
+            if match:
+                message = match.group("message").strip()
+    if not request_id and not message:
+        return None
+    return request_id, message
+
+
+def _extract_usage_limit_message(message: str) -> str | None:
+    normalized = message.strip()
+    if "You've hit your limit" in normalized:
+        return normalized
+    return None
+
+
+def _extract_oversized_read_error(stderr_lines: list[str]) -> tuple[str, str] | None:
+    pattern = re.compile(
+        r"Read tool error .*File content \((?P<observed>\d+) tokens\) exceeds maximum allowed tokens \((?P<maximum>\d+)\)"
+    )
+    for line in stderr_lines:
+        match = pattern.search(line)
+        if match:
+            return match.group("observed"), match.group("maximum")
+    return None
+
+
+def _extract_context_overload_error(stderr_lines: list[str]) -> tuple[str, int] | None:
+    autocompact_pattern = re.compile(r"autocompact: tokens=(?P<tokens>\d+)")
+    read_pattern = re.compile(r"executePreToolHooks called for tool: Read")
+    peak_tokens = 0
+    read_count = 0
+    for line in stderr_lines:
+        if read_pattern.search(line):
+            read_count += 1
+        match = autocompact_pattern.search(line)
+        if match:
+            peak_tokens = max(peak_tokens, int(match.group("tokens")))
+    if peak_tokens >= 50000 and read_count >= 3:
+        return str(peak_tokens), read_count
     return None
 
 
@@ -401,10 +818,19 @@ async def _collect_client_agent_result(client: Any) -> AgentResult:
     return AgentResult(
         result=(final_result.result or "\n".join(assistant_chunks)).strip(),
         structured_output=final_result.structured_output,
-        session_id=final_result.session_id,
+        session_id=_coerce_session_id(final_result.session_id),
         total_cost_usd=final_result.total_cost_usd,
         usage=final_result.usage,
     )
+
+
+def _coerce_session_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    text = str(value).strip()
+    return text or None
 
 
 def _resolve_claude_cli() -> str:

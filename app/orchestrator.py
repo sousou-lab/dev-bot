@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Awaitable, Callable
+
+from app.state_store import FileStateStore
+
+
+@dataclass(frozen=True)
+class WorkItem:
+    thread_id: int
+    repo_full_name: str
+    issue: dict
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        state_store: FileStateStore,
+        executor: Callable[[WorkItem], Awaitable[None]],
+        max_concurrency: int = 5,
+    ) -> None:
+        self.state_store = state_store
+        self.executor = executor
+        self.max_concurrency = max_concurrency
+        self._queue: asyncio.Queue[WorkItem] = asyncio.Queue()
+        self._running: dict[int, asyncio.Task[None]] = {}
+        self._queued_thread_ids: set[int] = set()
+        self._dispatcher_task: asyncio.Task[None] | None = None
+
+    def ensure_started(self) -> None:
+        if self._dispatcher_task and not self._dispatcher_task.done():
+            return
+        self._dispatcher_task = asyncio.create_task(self._dispatch_loop())
+
+    async def enqueue(self, item: WorkItem) -> bool:
+        if item.thread_id in self._running or item.thread_id in self._queued_thread_ids:
+            return False
+        self.state_store.update_status(item.thread_id, "queued")
+        await self._queue.put(item)
+        self._queued_thread_ids.add(item.thread_id)
+        self.ensure_started()
+        return True
+
+    def is_running(self, thread_id: int) -> bool:
+        task = self._running.get(thread_id)
+        return bool(task and not task.done())
+
+    def is_queued(self, thread_id: int) -> bool:
+        return thread_id in self._queued_thread_ids
+
+    async def _dispatch_loop(self) -> None:
+        while True:
+            if len(self._running) >= self.max_concurrency:
+                await asyncio.sleep(1)
+                self._cleanup_finished()
+                continue
+            item = await self._queue.get()
+            self._queued_thread_ids.discard(item.thread_id)
+            self._cleanup_finished()
+            task = asyncio.create_task(self._run_item(item))
+            self._running[item.thread_id] = task
+
+    async def _run_item(self, item: WorkItem) -> None:
+        try:
+            await self.executor(item)
+        except Exception as exc:
+            self.state_store.record_failure(
+                item.thread_id,
+                stage="run_execution",
+                message=str(exc),
+                details={"repo": item.repo_full_name},
+            )
+            self.state_store.update_status(item.thread_id, "failed")
+        finally:
+            self._running.pop(item.thread_id, None)
+
+    def _cleanup_finished(self) -> None:
+        stale = [thread_id for thread_id, task in self._running.items() if task.done()]
+        for thread_id in stale:
+            self._running.pop(thread_id, None)
+
+    async def restore(self, items: list[WorkItem]) -> None:
+        for item in items:
+            await self.enqueue(item)

@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "required": [
+    "goal",
+    "scope",
+    "assumptions",
+    "candidate_files",
+    "implementation_steps",
+    "verification_steps",
+    "risks",
+    "high_risk_changes"
+  ],
+  "properties": {
+    "goal": { "type": "string" },
+    "scope": { "type": "array", "items": { "type": "string" } },
+    "assumptions": { "type": "array", "items": { "type": "string" } },
+    "candidate_files": { "type": "array", "items": { "type": "string" } },
+    "implementation_steps": { "type": "array", "items": { "type": "string" } },
+    "verification_steps": { "type": "array", "items": { "type": "string" } },
+    "risks": { "type": "array", "items": { "type": "string" } },
+    "high_risk_changes": { "type": "array", "items": { "type": "string" } }
+  }
+}

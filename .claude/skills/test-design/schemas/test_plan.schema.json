@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "required": ["test_targets", "cases", "regression_risks"],
+  "properties": {
+    "test_targets": { "type": "array", "items": { "type": "string" } },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "purpose"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "purpose": { "type": "string" }
+        }
+      }
+    },
+    "regression_risks": { "type": "array", "items": { "type": "string" } }
+  }
+}
