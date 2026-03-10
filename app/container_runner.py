@@ -16,7 +16,6 @@ from claude_agent_sdk import AgentDefinition, ClaudeSDKClient, HookMatcher
 from app.agent_sdk_client import AgentResult, ClaudeAgentClient, _build_options, _collect_client_agent_result
 from app.repo_profiler import build_repo_profile
 
-
 AUTONOMOUS_IMPLEMENT_SYSTEM = """あなたはソフトウェア実装エージェントです。
 与えられた要件と既存リポジトリを見て、作業ディレクトリ内で自律的に実装を完了してください。
 
@@ -288,12 +287,16 @@ async def _run_autonomous_iterations(
                 )
                 await sdk_client.query(prompt)
                 raw_result = await _collect_client_agent_result(sdk_client)
-                last_agent_result = raw_result.structured_output if isinstance(raw_result.structured_output, dict) else {}
+                last_agent_result = (
+                    raw_result.structured_output if isinstance(raw_result.structured_output, dict) else {}
+                )
                 if not last_agent_result:
                     try:
                         last_agent_result = json.loads(raw_result.result)
                     except json.JSONDecodeError as exc:
-                        raise RuntimeError(f"Claude Agent SDK did not return valid JSON. Raw response: {raw_result.result[:500]!r}") from exc
+                        raise RuntimeError(
+                            f"Claude Agent SDK did not return valid JSON. Raw response: {raw_result.result[:500]!r}"
+                        ) from exc
                 last_agent_result["session_id"] = raw_result.session_id
                 last_agent_result["total_cost_usd"] = raw_result.total_cost_usd
                 last_agent_result["usage"] = raw_result.usage

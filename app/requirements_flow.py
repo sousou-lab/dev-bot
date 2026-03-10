@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-
 QUESTIONS = [
     ("change_type", "これは新機能ですか、それとも既存機能の改善ですか？"),
     ("completion", "完了条件は何ですか？"),
@@ -51,9 +50,7 @@ class RequirementsFlow:
         return RequirementReply(
             body=body,
             status="ready_for_confirmation",
-            artifacts={
-                "summary": self._build_planning_summary(answers)
-            },
+            artifacts={"summary": self._build_planning_summary(answers)},
         )
 
     def _load_messages(self, thread_id: int) -> list[dict]:
@@ -120,6 +117,11 @@ class RequirementsFlow:
                 return match.group(1).strip(" 　、,。")
         return ""
 
+    @staticmethod
+    def _digits_to_keys(digits: str) -> list[str]:
+        digit_map = {"2": "out_of_scope", "3": "users", "4": "constraints"}
+        return [digit_map[d] for d in digits if d in digit_map]
+
     def _assign_grouped_shortcuts(self, answers: dict[str, str], text: str) -> bool:
         normalized = text.replace(" ", "").replace("　", "")
         matched = False
@@ -138,7 +140,7 @@ class RequirementsFlow:
             target_keys = keys
             if pattern.startswith("("):
                 digits = match.group(1)
-                target_keys = tuple(_digits_to_keys(digits))
+                target_keys = tuple(self._digits_to_keys(digits))
                 value = match.group(2).strip("、,。")
             for key in target_keys:
                 if not answers[key]:
@@ -169,7 +171,9 @@ class RequirementsFlow:
         return {
             "background": " / ".join(part for part in background_parts if part),
             "goal": answers["completion"] or answers["change_type"],
-            "in_scope": [answers["completion"]] if answers["completion"] else ([answers["change_type"]] if answers["change_type"] else []),
+            "in_scope": [answers["completion"]]
+            if answers["completion"]
+            else ([answers["change_type"]] if answers["change_type"] else []),
             "out_of_scope": [answers["out_of_scope"]] if answers["out_of_scope"] else [],
             "acceptance_criteria": [answers["completion"]] if answers["completion"] else [],
             "constraints": constraint_items,

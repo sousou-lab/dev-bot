@@ -24,7 +24,12 @@ class DiscordPresenterTests(unittest.TestCase):
             review={"decision": "approve"},
             pending_approval={"status": "pending", "tool_name": "Bash", "input_text": "terraform apply"},
             planning_progress={"phase": "plan", "current": 1, "total": 3},
-            current_activity={"phase": "workspace", "summary": "workspace ready", "status": "running", "timestamp": "2026-03-11T00:00:00Z"},
+            current_activity={
+                "phase": "workspace",
+                "summary": "workspace ready",
+                "status": "running",
+                "timestamp": "2026-03-11T00:00:00Z",
+            },
             process={"pid": 123, "pgid": 456},
             runtime_active=True,
         )

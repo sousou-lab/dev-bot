@@ -7,8 +7,10 @@ from typing import Any
 try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:  # pragma: no cover - optional in bare test env
+
     def load_dotenv() -> None:
         return None
+
 
 try:  # pragma: no cover - exercised indirectly when dependency exists
     from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -42,6 +44,7 @@ def _parse_int(name: str, default: int) -> int:
 
 
 if PYDANTIC_AVAILABLE:
+
     class Settings(BaseModel):
         model_config = ConfigDict(frozen=True, extra="ignore")
 
@@ -105,13 +108,13 @@ if PYDANTIC_AVAILABLE:
             return value.strip()
 
         @model_validator(mode="after")
-        def _validate_planning_key(self) -> "Settings":
+        def _validate_planning_key(self) -> Settings:
             if not Path(self.github_app_private_key_path).expanduser().is_file():
                 raise ValueError("GITHUB_APP_PRIVATE_KEY_PATH must point to a readable file")
             return self
 
         @classmethod
-        def from_env(cls) -> "Settings":
+        def from_env(cls) -> Settings:
             return cls(
                 openai_api_key=os.getenv("OPENAI_API_KEY", ""),
                 discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),
@@ -162,6 +165,7 @@ if PYDANTIC_AVAILABLE:
             except OSError as exc:  # pragma: no cover - filesystem errors are environment dependent
                 raise RuntimeError(f"GITHUB_APP_PRIVATE_KEY_PATH is not readable: {key_path}") from exc
 else:
+
     class Settings:
         def __init__(self, **kwargs: Any) -> None:
             self.openai_api_key = str(kwargs.get("openai_api_key", "")).strip()
@@ -192,7 +196,7 @@ else:
             self.approval_timeout_seconds = int(kwargs.get("approval_timeout_seconds", 900))
 
         @classmethod
-        def from_env(cls) -> "Settings":
+        def from_env(cls) -> Settings:
             return cls(
                 openai_api_key=os.getenv("OPENAI_API_KEY", ""),
                 discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),

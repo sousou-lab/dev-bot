@@ -6,7 +6,6 @@ from typing import Any
 
 from app.agent_sdk_client import ClaudeAgentClient
 
-
 VERIFICATION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["status", "failure_type", "retry_recommended", "human_check_recommended", "notes"],
@@ -16,8 +15,8 @@ VERIFICATION_SCHEMA: dict[str, Any] = {
         "retry_recommended": {"type": "boolean"},
         "human_check_recommended": {"type": "boolean"},
         "notes": {"type": "array", "items": {"type": "string"}},
-        "command_results_summary": {"type": "array", "items": {"type": "string"}}
-    }
+        "command_results_summary": {"type": "array", "items": {"type": "string"}},
+    },
 }
 
 REVIEW_SCHEMA: dict[str, Any] = {
@@ -28,8 +27,8 @@ REVIEW_SCHEMA: dict[str, Any] = {
         "unnecessary_changes": {"type": "array", "items": {"type": "string"}},
         "test_gaps": {"type": "array", "items": {"type": "string"}},
         "risk_items": {"type": "array", "items": {"type": "string"}},
-        "protected_path_touches": {"type": "array", "items": {"type": "string"}}
-    }
+        "protected_path_touches": {"type": "array", "items": {"type": "string"}},
+    },
 }
 
 

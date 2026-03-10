@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -29,7 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local test env
         message_content = False
 
         @classmethod
-        def default(cls) -> "_StubIntents":
+        def default(cls) -> _StubIntents:
             return cls()
 
     class _StubResponse:
@@ -86,7 +85,7 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local test env
             del args, kwargs
 
         @classmethod
-        def __class_getitem__(cls, item: Any) -> type["_StubChoice"]:
+        def __class_getitem__(cls, item: Any) -> type[_StubChoice]:
             del item
             return cls
 
@@ -132,7 +131,6 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local test env
     discord = _StubDiscordModule()
     app_commands = _StubAppCommands()
 
-from app.approvals import ApprovalCoordinator
 from app.agent_sdk_client import (
     AgentBufferOverflowError,
     AgentContextOverloadError,
@@ -142,6 +140,7 @@ from app.agent_sdk_client import (
     AgentRateLimitError,
     AgentTimeoutError,
 )
+from app.approvals import ApprovalCoordinator
 from app.chat_inputs import chunk_message, ensure_new_thread_body, materialize_message_payload, parse_message_inputs
 from app.config import Settings
 from app.discord_presenters import (
@@ -159,7 +158,6 @@ from app.repo_profiler import build_repo_profile
 from app.requirements_agent import RequirementsAgent
 from app.run_request import ensure_issue_and_enqueue
 from app.state_store import FileStateStore
-
 
 DERIVED_ARTIFACTS = (
     "issue.json",
@@ -360,7 +358,9 @@ class DevBotClient(discord.Client):
     async def _parse_message_inputs(self, message: discord.Message) -> dict[str, Any]:
         return await parse_message_inputs(message)
 
-    async def _materialize_message_payload(self, thread_id: int, message: discord.Message, parsed: dict[str, Any]) -> str:
+    async def _materialize_message_payload(
+        self, thread_id: int, message: discord.Message, parsed: dict[str, Any]
+    ) -> str:
         return materialize_message_payload(
             thread_id=thread_id,
             message_id=message.id,
@@ -372,7 +372,9 @@ class DevBotClient(discord.Client):
         for chunk in self._chunk_message(content):
             await channel.send(chunk)
 
-    async def _send_interaction_text(self, interaction: discord.Interaction, content: str, *, ephemeral: bool = False) -> None:
+    async def _send_interaction_text(
+        self, interaction: discord.Interaction, content: str, *, ephemeral: bool = False
+    ) -> None:
         chunks = self._chunk_message(content)
         if interaction.response.is_done():
             for chunk in chunks:
@@ -382,7 +384,9 @@ class DevBotClient(discord.Client):
         for chunk in chunks[1:]:
             await interaction.followup.send(chunk, ephemeral=ephemeral)
 
-    async def _send_followup_text(self, interaction: discord.Interaction, content: str, *, ephemeral: bool = False) -> None:
+    async def _send_followup_text(
+        self, interaction: discord.Interaction, content: str, *, ephemeral: bool = False
+    ) -> None:
         for chunk in self._chunk_message(content):
             try:
                 await interaction.followup.send(chunk, ephemeral=ephemeral)
@@ -423,7 +427,9 @@ class DevBotClient(discord.Client):
     async def status_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         self._reconcile_thread_runtime_state(thread_id)
         meta = self.state_store.load_meta(thread_id)
@@ -438,7 +444,9 @@ class DevBotClient(discord.Client):
         planning_progress = self.state_store.load_artifact(thread_id, "planning_progress.json")
         current_activity = self.state_store.load_artifact(thread_id, "current_activity.json")
         process = self.process_registry.load(thread_id)
-        runtime_active = self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id) or bool(process)
+        runtime_active = (
+            self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id) or bool(process)
+        )
         await self._send_interaction_text(
             interaction,
             format_status_message(
@@ -463,7 +471,9 @@ class DevBotClient(discord.Client):
     async def issue_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         issue = self.state_store.load_artifact(thread_id, "issue.json")
         if not issue:
@@ -477,7 +487,9 @@ class DevBotClient(discord.Client):
     async def pr_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         pr = self.state_store.load_artifact(thread_id, "pr.json")
         if not pr:
@@ -491,13 +503,17 @@ class DevBotClient(discord.Client):
     async def abort_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         stopped = await self.pipeline.abort(thread_id)
         if stopped:
             await interaction.response.send_message("実行中プロセスの停止を要求しました。", ephemeral=True)
             return
-        await interaction.response.send_message("停止対象は見つかりませんでした。状態だけ `aborted` に更新しました。", ephemeral=True)
+        await interaction.response.send_message(
+            "停止対象は見つかりませんでした。状態だけ `aborted` に更新しました。", ephemeral=True
+        )
 
     async def approve_command(self, interaction: discord.Interaction) -> None:
         await self._resolve_approval(interaction, approved=True)
@@ -508,7 +524,9 @@ class DevBotClient(discord.Client):
     async def retry_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
         failure_type = str(verification.get("failure_type", "")) if isinstance(verification, dict) else ""
@@ -526,7 +544,9 @@ class DevBotClient(discord.Client):
     async def revise_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         if self.orchestrator.is_running(thread_id):
             await interaction.response.send_message("実行中です。先に `/abort` してください。", ephemeral=True)
@@ -547,7 +567,9 @@ class DevBotClient(discord.Client):
     async def diff_command(self, interaction: discord.Interaction, pathspec: str | None = None) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         meta = self.state_store.load_meta(thread_id)
         workspace = str(meta.get("workspace", "")).strip()
@@ -564,7 +586,9 @@ class DevBotClient(discord.Client):
     async def why_failed_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         last_failure = self.state_store.load_artifact(thread_id, "last_failure.json")
         verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
@@ -582,7 +606,9 @@ class DevBotClient(discord.Client):
     async def budget_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         final_result = self.state_store.load_artifact(thread_id, "final_result.json")
         verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
@@ -622,7 +648,9 @@ class DevBotClient(discord.Client):
     async def _generate_plan(self, interaction: discord.Interaction, repo: str, *, alias_used: bool) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         if self.orchestrator.is_running(thread_id):
             await interaction.response.send_message("実行中です。先に `/abort` してください。", ephemeral=True)
@@ -750,7 +778,9 @@ class DevBotClient(discord.Client):
         prefix = "互換コマンド `/confirm` を `/plan` として扱いました。\n\n" if alias_used else ""
         plan_message = prefix + self._format_plan_message(repo, artifacts["plan"], artifacts["test_plan"])
         try:
-            issue = await self._enqueue_run_for_thread(thread_id=thread_id, channel=interaction.channel, repo_full_name=repo)
+            issue = await self._enqueue_run_for_thread(
+                thread_id=thread_id, channel=interaction.channel, repo_full_name=repo
+            )
         except (RuntimeError, ValueError) as exc:
             await self._send_followup_text(
                 interaction,
@@ -772,7 +802,9 @@ class DevBotClient(discord.Client):
     async def _start_run(self, interaction: discord.Interaction, repo: str | None) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         if self.orchestrator.is_running(thread_id):
             await interaction.response.send_message("すでに実行中です。", ephemeral=True)
@@ -781,15 +813,25 @@ class DevBotClient(discord.Client):
         summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
         plan = self.state_store.load_artifact(thread_id, "plan.json")
         test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
-        if not isinstance(summary, dict) or not isinstance(plan, dict) or not isinstance(test_plan, dict) or not plan or not test_plan:
+        if (
+            not isinstance(summary, dict)
+            or not isinstance(plan, dict)
+            or not isinstance(test_plan, dict)
+            or not plan
+            or not test_plan
+        ):
             await interaction.response.send_message("先に `/plan repo:owner/repo` を実行してください。", ephemeral=True)
             return
 
         meta = self.state_store.load_meta(thread_id)
         issue = self.state_store.load_artifact(thread_id, "issue.json")
-        repo_full_name = repo or (issue.get("repo_full_name") if isinstance(issue, dict) else "") or str(meta.get("github_repo", ""))
+        repo_full_name = (
+            repo or (issue.get("repo_full_name") if isinstance(issue, dict) else "") or str(meta.get("github_repo", ""))
+        )
         if not repo_full_name:
-            await interaction.response.send_message("repo を決められませんでした。`/run repo:owner/repo` を指定してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "repo を決められませんでした。`/run repo:owner/repo` を指定してください。", ephemeral=True
+            )
             return
 
         await interaction.response.defer(thinking=True)
@@ -903,7 +945,9 @@ class DevBotClient(discord.Client):
         )
 
     def _build_diff_summary(self, workspace: str, pathspec: str) -> str:
-        status = subprocess.run(["git", "-C", workspace, "status", "--short"], check=True, capture_output=True, text=True)
+        status = subprocess.run(
+            ["git", "-C", workspace, "status", "--short"], check=True, capture_output=True, text=True
+        )
         if not status.stdout.strip():
             return "作業差分はありません。"
         diff_stat_cmd = ["git", "-C", workspace, "diff", "--stat"]
@@ -924,7 +968,9 @@ class DevBotClient(discord.Client):
     async def _resolve_approval(self, interaction: discord.Interaction, approved: bool) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
-            await interaction.response.send_message("このコマンドは管理対象スレッド内で実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
             return
         if not self.approval_coordinator.has_pending_request(thread_id):
             await interaction.response.send_message("承認待ちの操作はありません。", ephemeral=True)
@@ -948,7 +994,9 @@ class DevBotClient(discord.Client):
                         workspace_key=f"{repo_full_name}#{issue.get('number')}",
                     )
                 )
-                await interaction.response.send_message("高リスク操作を承認しました。run を再キューしました。", ephemeral=True)
+                await interaction.response.send_message(
+                    "高リスク操作を承認しました。run を再キューしました。", ephemeral=True
+                )
                 return
             self.state_store.update_status(thread_id, "running")
             await interaction.response.send_message("高リスク操作を承認しました。run を再開します。", ephemeral=True)

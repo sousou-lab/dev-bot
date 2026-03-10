@@ -3,17 +3,16 @@ from __future__ import annotations
 import json
 import os
 import re
-from html import unescape
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 from dataclasses import dataclass
+from html import unescape
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from app.agent_sdk_client import ClaudeAgentClient
 from app.config import Settings
 from app.requirements_flow import RequirementReply, RequirementsFlow
-
 
 SYSTEM_PROMPT = """あなたはソフトウェア開発の要件整理エージェントです。
 Discordスレッド内の会話履歴を読み、次に返すべき内容を決めてください。
@@ -73,11 +72,11 @@ REQUIREMENTS_SCHEMA = {
                         "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                         "constraints": {"type": "array", "items": {"type": "string"}},
                         "test_focus": {"type": "array", "items": {"type": "string"}},
-                        "open_questions": {"type": "array", "items": {"type": "string"}}
-                    }
+                        "open_questions": {"type": "array", "items": {"type": "string"}},
+                    },
                 },
                 {"type": "string"},
-                {"type": "null"}
+                {"type": "null"},
             ]
         },
     },
@@ -180,11 +179,7 @@ class RequirementsAgent:
         except Exception:
             raw = client.run_text(
                 SYSTEM_PROMPT,
-                (
-                    f"{prompt}\n\n"
-                    "必ず JSON オブジェクトだけを返してください。"
-                    " Markdown、前置き、説明文は禁止です。"
-                ),
+                (f"{prompt}\n\n必ず JSON オブジェクトだけを返してください。 Markdown、前置き、説明文は禁止です。"),
                 max_turns=1,
                 allowed_tools=[],
                 permission_mode="default",
@@ -192,14 +187,16 @@ class RequirementsAgent:
             )
             text = raw.result.strip()
             if not text:
-                raise RuntimeError("Requirements agent returned an empty response.")
+                raise RuntimeError("Requirements agent returned an empty response.") from None
             try:
                 return json.loads(text)
             except json.JSONDecodeError:
                 extracted = _extract_json_object(text)
                 if extracted is not None:
                     return extracted
-                raise RuntimeError(f"Requirements agent did not return valid JSON. Raw response: {text[:500]!r}")
+                raise RuntimeError(
+                    f"Requirements agent did not return valid JSON. Raw response: {text[:500]!r}"
+                ) from None
 
     def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)
@@ -250,10 +247,7 @@ class RequirementsAgent:
                 normalized = [str(item).strip() for item in open_questions if str(item).strip()]
                 if normalized:
                     lines = "\n".join(f"{index}. {question}" for index, question in enumerate(normalized[:5], start=1))
-                    return (
-                        "不足している情報をまとめて確認します。分かる範囲でまとめて回答してください。\n\n"
-                        f"{lines}"
-                    )
+                    return f"不足している情報をまとめて確認します。分かる範囲でまとめて回答してください。\n\n{lines}"
 
         return str(payload.get("reply", ""))
 
@@ -311,11 +305,7 @@ def _fetch_reference_material(url: str) -> dict[str, str]:
 def _format_reference_material(item: dict[str, str]) -> str:
     if item.get("status") != "ok":
         return f"- URL: {item.get('url')}\n  status: error\n  error: {item.get('error')}"
-    return (
-        f"- URL: {item.get('url')}\n"
-        "  status: ok\n"
-        f"  excerpt: {item.get('content')}"
-    )
+    return f"- URL: {item.get('url')}\n  status: ok\n  excerpt: {item.get('content')}"
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:

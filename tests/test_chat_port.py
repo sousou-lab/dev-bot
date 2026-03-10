@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import unittest
 
 from app.chat_port import ChatChannel, ChatPort

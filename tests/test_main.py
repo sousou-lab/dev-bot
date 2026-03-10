@@ -30,7 +30,9 @@ class MainModuleTests(unittest.TestCase):
         with (
             patch.object(module, "load_settings", return_value=settings),
             patch.object(module, "validate_settings", return_value=[]),
-            patch.object(module.GitHubIssueClient, "preflight", return_value={"ok": True, "repo_count": 0, "sample_repos": []}),
+            patch.object(
+                module.GitHubIssueClient, "preflight", return_value={"ok": True, "repo_count": 0, "sample_repos": []}
+            ),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = module.main()

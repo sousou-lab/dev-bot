@@ -233,7 +233,9 @@ class ClaudeAgentClient:
         prefetched_stderr: list[str] = []
         self._raise_for_oversized_read(result, prompt_kind=prompt_kind)
         forbidden_tool = _extract_forbidden_tool_attempt(result.stderr or [])
-        if forbidden_tool is not None and _should_retry_forbidden_tool(prompt_kind=prompt_kind, tool_name=forbidden_tool[0]):
+        if forbidden_tool is not None and _should_retry_forbidden_tool(
+            prompt_kind=prompt_kind, tool_name=forbidden_tool[0]
+        ):
             prefetched_stderr = list(result.stderr or [])
             result = self.run_text(
                 system=system,
@@ -361,7 +363,9 @@ class ClaudeAgentClient:
                             session_id=_coerce_session_id(retry_result.session_id),
                             stderr=result_stderr + list(retry_result.stderr or []),
                         )
-            detail = "\n".join(result_stderr[-20:] + ((retry_result.stderr or [])[-20:] if retry_result else [])).strip()
+            detail = "\n".join(
+                result_stderr[-20:] + ((retry_result.stderr or [])[-20:] if retry_result else [])
+            ).strip()
             message = f"Claude Agent SDK did not return valid JSON. Raw response: {text[:500]!r}"
             if detail:
                 message = f"{message} stderr:\n{detail}"
@@ -371,7 +375,7 @@ class ClaudeAgentClient:
                 stderr=result_stderr + list(retry_result.stderr or []),
                 session_id=retry_result.session_id or result.session_id,
                 prompt_kind=prompt_kind,
-            )
+            ) from None
 
     def _raise_for_forbidden_tool(self, result: AgentResult, *, prompt_kind: str | None) -> None:
         denied = _extract_forbidden_tool_attempt(result.stderr or [])
@@ -581,7 +585,7 @@ async def _query_text(
                 request_id="",
             ) from exc
         raise
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         detail = "\n".join(stderr_lines[-20:]).strip()
         rate_limit = _extract_rate_limit_error(stderr_lines)
         if rate_limit is not None:
@@ -647,7 +651,7 @@ async def _persistent_json_responses(
         return await _run_sequence()
     try:
         return await asyncio.wait_for(_run_sequence(), timeout=timeout_seconds)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise RuntimeError("Claude Agent SDK timed out before returning a final result.") from exc
 
 
@@ -828,8 +832,7 @@ def _build_options(
         auth_status = _claude_auth_status(cli_path)
         if not auth_status.get("loggedIn"):
             raise RuntimeError(
-                "Claude Code CLI が未ログインです。"
-                f" status={json.dumps(auth_status, ensure_ascii=False)}"
+                f"Claude Code CLI が未ログインです。 status={json.dumps(auth_status, ensure_ascii=False)}"
             )
     debug_info = AgentDebugInfo(
         cli_path=cli_path,
@@ -877,7 +880,7 @@ async def _collect_client_json_response(client: Any) -> dict[str, Any]:
         extracted = _extract_json_object(text)
         if extracted is not None:
             return extracted
-        raise RuntimeError(f"Claude Agent SDK did not return valid JSON. Raw response: {text[:500]!r}")
+        raise RuntimeError(f"Claude Agent SDK did not return valid JSON. Raw response: {text[:500]!r}") from None
 
 
 async def _collect_client_agent_result(client: Any) -> AgentResult:
@@ -919,8 +922,7 @@ def _resolve_claude_cli() -> str:
     if cli_path:
         return cli_path
     raise RuntimeError(
-        "Claude Code CLI が見つかりません。"
-        f" PATH={os.environ.get('PATH', '')!r} HOME={os.environ.get('HOME', '')!r}"
+        f"Claude Code CLI が見つかりません。 PATH={os.environ.get('PATH', '')!r} HOME={os.environ.get('HOME', '')!r}"
     )
 
 

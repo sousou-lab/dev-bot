@@ -136,11 +136,14 @@ def format_plan_message(repo: str, plan: dict[str, Any], test_plan: dict[str, An
     scope = "\n".join(f"- {item}" for item in plan.get("scope", [])[:6]) or "- なし"
     steps = "\n".join(f"- {item}" for item in plan.get("implementation_steps", [])[:6]) or "- なし"
     risks = "\n".join(f"- {item}" for item in plan.get("risks", [])[:4]) or "- なし"
-    test_cases = "\n".join(
-        f"- {case.get('id', 'TC')} {case.get('name', '')} [{case.get('category', '')}/{case.get('priority', '')}]"
-        for case in test_plan.get("cases", [])[:6]
-        if isinstance(case, dict)
-    ) or "- なし"
+    test_cases = (
+        "\n".join(
+            f"- {case.get('id', 'TC')} {case.get('name', '')} [{case.get('category', '')}/{case.get('priority', '')}]"
+            for case in test_plan.get("cases", [])[:6]
+            if isinstance(case, dict)
+        )
+        or "- なし"
+    )
     return (
         "plan.json / test_plan.json を生成しました。\n"
         f"- Repo: `{repo}`\n"

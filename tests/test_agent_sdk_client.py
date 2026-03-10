@@ -85,7 +85,7 @@ class ClaudeAgentClientTests(unittest.TestCase):
                     result="",
                     session_id="sess_forbidden",
                     stderr=[
-                        '2026-03-09T13:30:54.771Z [DEBUG] Hook PreToolUse (callback) returned permissionDecision: deny (reason: `ToolSearch` is disabled during planning)',
+                        "2026-03-09T13:30:54.771Z [DEBUG] Hook PreToolUse (callback) returned permissionDecision: deny (reason: `ToolSearch` is disabled during planning)",
                         "2026-03-09T13:30:54.772Z [DEBUG] Hook denied tool use for ToolSearch",
                     ],
                 )
@@ -139,7 +139,10 @@ class ClaudeAgentClientTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            ("req_011CYsj3yc9jtLoGkguBUjnF", "This request would exceed your account's rate limit. Please try again later."),
+            (
+                "req_011CYsj3yc9jtLoGkguBUjnF",
+                "This request would exceed your account's rate limit. Please try again later.",
+            ),
             parsed,
         )
 

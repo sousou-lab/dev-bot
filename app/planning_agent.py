@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.agent_sdk_client import ClaudeAgentClient
 from app.config import Settings
-
 
 READ_ONLY_TOOLS = [
     "Read",
@@ -258,7 +258,9 @@ class PlanningAgent:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> PlanningArtifacts:
         if not self._has_plannable_summary(summary):
-            raise ValueError("requirement_summary.json に planning に必要な goal / in_scope / acceptance_criteria が不足しています。")
+            raise ValueError(
+                "requirement_summary.json に planning に必要な goal / in_scope / acceptance_criteria が不足しています。"
+            )
         client = ClaudeAgentClient(
             api_key=self.settings.anthropic_api_key,
             timeout_seconds=float(300),
@@ -278,10 +280,7 @@ class PlanningAgent:
         )
         plan = client.json_response(
             PLAN_SYSTEM_PROMPT,
-            (
-                f"{common_prompt}\n"
-                "既存コードを読んで plan.json を作成してください。"
-            ),
+            (f"{common_prompt}\n既存コードを読んで plan.json を作成してください。"),
             cwd=workspace,
             max_turns=4,
             allowed_tools=READ_ONLY_TOOLS,
@@ -357,11 +356,7 @@ class PlanningAgent:
             prompt_kind="test_plan",
         )
         overview = overview_result.payload
-        acceptance_items = [
-            str(item).strip()
-            for item in summary.get("acceptance_criteria", [])
-            if str(item).strip()
-        ]
+        acceptance_items = [str(item).strip() for item in summary.get("acceptance_criteria", []) if str(item).strip()]
         if not acceptance_items:
             acceptance_items = ["全体要件"]
         if progress_callback is not None:
@@ -421,6 +416,7 @@ class PlanningAgent:
 
         return _merge_test_plan_chunks(overview, case_chunks)
 
+
 def _build_repo_context(workspace: str, repo_profile: dict[str, Any]) -> str:
     root = Path(workspace)
     sections: list[str] = []
@@ -478,8 +474,7 @@ def _read_excerpt(path: Path, limit: int) -> str:
 def _merge_test_plan_chunks(overview: dict[str, Any], chunks: list[dict[str, Any]]) -> dict[str, Any]:
     strategy = overview.get("strategy", {})
     merged_strategy = {
-        key: _dedupe_preserve_order(strategy.get(key, []))
-        for key in ("unit", "integration", "e2e", "mocking")
+        key: _dedupe_preserve_order(strategy.get(key, [])) for key in ("unit", "integration", "e2e", "mocking")
     }
     all_cases: list[dict[str, Any]] = []
     regression_risks: list[str] = []

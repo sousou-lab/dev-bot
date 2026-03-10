@@ -71,8 +71,12 @@ class WorkspaceManager:
             "artifacts_dir": str(resolved_run_root / "artifacts"),
         }
 
-    def prepare_plan_workspace(self, repo_full_name: str, thread_id: int | None = None, issue_number: int | None = None) -> dict:
-        run_root, workspace = self._prepare_root(repo_full_name, thread_id=thread_id, issue_number=issue_number, mode="plan")
+    def prepare_plan_workspace(
+        self, repo_full_name: str, thread_id: int | None = None, issue_number: int | None = None
+    ) -> dict:
+        run_root, workspace = self._prepare_root(
+            repo_full_name, thread_id=thread_id, issue_number=issue_number, mode="plan"
+        )
         if not workspace.exists():
             self._run(["git", "clone", "--depth", "1", self._clone_url(repo_full_name), str(workspace)])
         else:

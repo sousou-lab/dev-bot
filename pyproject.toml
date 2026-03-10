@@ -11,4 +11,53 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "ruff>=0.11.12",
+    "pyright>=1.1.400",
 ]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "SIM108", # ternary operator (readability)
+    "UP007",  # use X | Y for union (not always clearer)
+    "RUF001", # ambiguous unicode (intentional Japanese text)
+    "RUF005", # consider unpacking (readability preference)
+    "RUF006", # dangling asyncio.create_task (managed externally)
+    "SIM103", # return condition directly (readability)
+    "SIM105", # contextlib.suppress (readability preference)
+    "SIM115", # context manager for open (one-liner pattern)
+    "SIM117", # nested with statements (readability in tests)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
+include = ["app"]
+exclude = ["tests", ".venv", "node_modules"]
+reportMissingImports = "warning"
+reportMissingTypeStubs = false
+reportInvalidTypeForm = false
+reportOptionalCall = "warning"
+reportOptionalMemberAccess = "warning"
+reportArgumentType = "warning"
+reportGeneralTypeIssues = "warning"
+reportCallIssue = "warning"
+reportRedeclaration = "warning"
+reportAttributeAccessIssue = "warning"

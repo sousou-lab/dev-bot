@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 from app.state_store import FileStateStore
 
@@ -39,7 +39,12 @@ class Orchestrator:
 
     async def enqueue(self, item: WorkItem) -> bool:
         item_key = self._item_key(item)
-        if item.thread_id in self._running or item.thread_id in self._queued_thread_ids or item_key in self._running_keys or item_key in self._queued_keys:
+        if (
+            item.thread_id in self._running
+            or item.thread_id in self._queued_thread_ids
+            or item_key in self._running_keys
+            or item_key in self._queued_keys
+        ):
             return False
         self.state_store.update_status(item.thread_id, "queued")
         await self._queue.put(item)

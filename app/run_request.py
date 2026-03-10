@@ -20,7 +20,13 @@ async def ensure_issue_and_enqueue(
     summary = state_store.load_artifact(thread_id, "requirement_summary.json")
     plan = state_store.load_artifact(thread_id, "plan.json")
     test_plan = state_store.load_artifact(thread_id, "test_plan.json")
-    if not isinstance(summary, dict) or not isinstance(plan, dict) or not isinstance(test_plan, dict) or not plan or not test_plan:
+    if (
+        not isinstance(summary, dict)
+        or not isinstance(plan, dict)
+        or not isinstance(test_plan, dict)
+        or not plan
+        or not test_plan
+    ):
         raise ValueError("先に `/plan repo:owner/repo` を実行してください。")
 
     issue = state_store.load_artifact(thread_id, "issue.json")

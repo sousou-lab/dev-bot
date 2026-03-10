@@ -151,7 +151,9 @@ class FileStateStore:
         run_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(run_dir / filename, payload)
 
-    def write_execution_artifact(self, thread_id: int, filename: str, payload: object, run_id: str | None = None) -> None:
+    def write_execution_artifact(
+        self, thread_id: int, filename: str, payload: object, run_id: str | None = None
+    ) -> None:
         artifacts_dir = self.execution_artifacts_dir(thread_id, run_id)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(artifacts_dir / filename, payload)
