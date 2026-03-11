@@ -79,6 +79,12 @@ class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
         self.github_client = MagicMock()
         self.github_client.get_issue_snapshot.return_value = make_test_issue()
         self.github_client.create_pull_request.return_value = _make_pr()
+        self.github_client.get_pull_request_status.return_value = {
+            "draft": True,
+            "mergeable": True,
+            "mergeable_state": "clean",
+            "head_sha": "headsha123",
+        }
         self.github_client.create_issue_comment.return_value = None
         self.github_client.update_issue_state.return_value = None
         self.github_client.upsert_workpad_comment.return_value = None
@@ -188,6 +194,7 @@ class TestFullSuccessPath(PipelineE2EBase):
 
         meta = self.state_store.load_meta(ISSUE_KEY)
         self.assertEqual(meta.get("status"), "Human Review")
+        self.assertEqual("headsha123", self.state_store.load_artifact(ISSUE_KEY, "pr.json")["head_sha"])
 
     async def test_message_order_in_success_path(self) -> None:
         with (

@@ -972,7 +972,9 @@ class DevBotClient(discord.Client):
             return
         pr = self.state_store.load_artifact(issue_key, "pr.json")
         if not isinstance(pr, dict) or not pr or not pr.get("number"):
-            self._mark_merging_blocked(issue_key, thread_id, "merge 対象の PR が見つかりません")
+            await self._mark_merging_blocked(
+                issue_key, thread_id, repo_full_name, issue_number, "merge 対象の PR が見つかりません"
+            )
             return
         try:
             pr_status = await asyncio.to_thread(
@@ -981,11 +983,13 @@ class DevBotClient(discord.Client):
                 int(pr["number"]),
             )
         except Exception as exc:
-            self._mark_merging_blocked(issue_key, thread_id, f"PR status lookup failed: {exc}")
+            await self._mark_merging_blocked(
+                issue_key, thread_id, repo_full_name, issue_number, f"PR status lookup failed: {exc}"
+            )
             return
-        guard_failure = self._merge_guard_failure(pr_status)
+        guard_failure = self._merge_guard_failure(pr, pr_status)
         if guard_failure:
-            self._mark_merging_blocked(issue_key, thread_id, guard_failure)
+            await self._mark_merging_blocked(issue_key, thread_id, repo_full_name, issue_number, guard_failure)
             return
         try:
             result = await asyncio.to_thread(
@@ -994,11 +998,13 @@ class DevBotClient(discord.Client):
                 int(pr["number"]),
             )
         except Exception as exc:
-            self._mark_merging_blocked(issue_key, thread_id, f"PR merge failed: {exc}")
+            await self._mark_merging_blocked(
+                issue_key, thread_id, repo_full_name, issue_number, f"PR merge failed: {exc}"
+            )
             return
         if not result.get("merged"):
             message = str(result.get("message", "")).strip() or "GitHub merge API returned merged=false"
-            self._mark_merging_blocked(issue_key, thread_id, message)
+            await self._mark_merging_blocked(issue_key, thread_id, repo_full_name, issue_number, message)
             return
         self.state_store.update_status(issue_key, "Done")
         self.state_store.update_meta(issue_key, runtime_status="", merged_sha=str(result.get("sha", "")))
@@ -1025,7 +1031,11 @@ class DevBotClient(discord.Client):
                 f"PR を merge しました。Done に更新しました。\n- PR: #{pr['number']}\n- URL: {pr.get('url', '')}"
             )
 
-    def _merge_guard_failure(self, pr_status: dict[str, Any]) -> str:
+    def _merge_guard_failure(self, pr: dict[str, Any], pr_status: dict[str, Any]) -> str:
+        expected_head_sha = str(pr.get("head_sha", "")).strip()
+        actual_head_sha = str(pr_status.get("head_sha", "")).strip()
+        if expected_head_sha and actual_head_sha and expected_head_sha != actual_head_sha:
+            return f"head_sha_changed expected={expected_head_sha} actual={actual_head_sha}"
         if bool(pr_status.get("draft")):
             return "PR is still draft"
         mergeable = pr_status.get("mergeable")
@@ -1036,9 +1046,20 @@ class DevBotClient(discord.Client):
             return f"mergeable_state={mergeable_state}"
         return ""
 
-    def _mark_merging_blocked(self, issue_key: str, thread_id: int, reason: str) -> None:
+    async def _mark_merging_blocked(
+        self,
+        issue_key: str,
+        thread_id: int,
+        repo_full_name: str,
+        issue_number: int,
+        reason: str,
+    ) -> None:
         self.state_store.update_status(issue_key, "Blocked")
         self.state_store.update_meta(issue_key, runtime_status="")
+        try:
+            await asyncio.to_thread(self.github_client.update_issue_state, repo_full_name, issue_number, "Blocked")
+        except Exception as exc:
+            logger.warning("merge blocked: failed to update project state for %s: %s", issue_key, exc)
         self.state_store.record_activity(
             issue_key,
             phase="merge",
@@ -1389,8 +1410,17 @@ class DevBotClient(discord.Client):
                 return
         if is_active:
             return
+        next_state = "Blocked" if state == "Merging" else "Rework"
         self.state_store.update_meta(runtime_key, runtime_status="")
-        self.state_store.update_status(runtime_key, "Blocked" if state == "Merging" else "Rework")
+        self.state_store.update_status(runtime_key, next_state)
+        if isinstance(runtime_key, str):
+            repo_full_name = str(meta.get("github_repo", "")).strip()
+            issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+            if repo_full_name and issue_number:
+                try:
+                    self.github_client.update_issue_state(repo_full_name, issue_number, next_state)
+                except Exception as exc:
+                    logger.warning("runtime reconcile: failed to update project state for %s: %s", runtime_key, exc)
         self.state_store.record_activity(
             runtime_key,
             phase="reconcile",
@@ -1517,6 +1547,14 @@ class DevBotClient(discord.Client):
                     continue
                 self.state_store.update_status(issue_key, "Rework")
                 self.state_store.update_meta(issue_key, runtime_status="")
+                issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+                if repo_full_name and issue_number:
+                    try:
+                        await asyncio.to_thread(
+                            self.github_client.update_issue_state, repo_full_name, issue_number, "Rework"
+                        )
+                    except Exception as exc:
+                        logger.warning("restore: failed to update project state for %s: %s", issue_key, exc)
                 continue
             if str(meta.get("status")) != "Ready" and str(meta.get("status")) != "Rework":
                 continue

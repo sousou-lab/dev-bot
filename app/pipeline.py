@@ -462,6 +462,18 @@ class DevelopmentPipeline:
             base=workspace_info["base_branch"],
             draft=True,
         )
+        try:
+            pr_status = await asyncio.to_thread(
+                self.github_client.get_pull_request_status,
+                repo_full_name,
+                int(pr["number"]),
+            )
+        except Exception:
+            pr_status = {}
+        if isinstance(pr_status, dict):
+            head_sha = str(pr_status.get("head_sha", "")).strip()
+            if head_sha:
+                pr["head_sha"] = head_sha
         self.state_store.write_artifact(issue_key, "pr.json", pr)
         self.state_store.write_execution_artifact(issue_key, "pr.json", pr, run_id)
         comment_body = self._build_pr_comment(channel_url, verification, review, command_results)

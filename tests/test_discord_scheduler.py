@@ -186,6 +186,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.client._scheduler_tick()
 
         self.assertEqual("Blocked", self.state_store.load_issue_meta(issue_key)["status"])
+        self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Blocked")
 
     async def test_scheduler_tick_blocks_merging_issue_when_pr_is_still_draft(self) -> None:
         issue_key = "owner/repo#42"
@@ -233,6 +234,55 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.client._scheduler_tick()
 
         self.assertEqual("Blocked", self.state_store.load_issue_meta(issue_key)["status"])
+        self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Blocked")
+
+    async def test_scheduler_tick_blocks_merging_issue_when_pr_head_sha_changed(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Merging")
+        self.state_store.update_issue_meta(
+            issue_key, github_repo="owner/repo", issue_number="42", plan_state="Approved"
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "pr.json",
+            {"number": 99, "url": "https://github.com/owner/repo/pull/99", "head_sha": "expectedsha"},
+        )
+        self.client.github_client = MagicMock()
+        self.client.github_client.list_project_issues.return_value = [
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "body": "body",
+                "url": "https://github.com/owner/repo/issues/42",
+                "issue_state": "OPEN",
+                "state": "Merging",
+                "plan": "Approved",
+            }
+        ]
+        self.client.github_client.get_pull_request_status.return_value = {
+            "draft": False,
+            "mergeable": True,
+            "mergeable_state": "clean",
+            "head_sha": "actualsha",
+        }
+        self.client.github_client.update_issue_state.return_value = None
+        self.client.github_client.upsert_workpad_comment.return_value = None
+
+        await self.client._scheduler_tick()
+
+        self.assertEqual("Blocked", self.state_store.load_issue_meta(issue_key)["status"])
+        self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Blocked")
 
     async def test_restore_pending_runs_keeps_in_progress_issue_when_process_record_exists(self) -> None:
         issue_key = "owner/repo#42"
@@ -261,3 +311,32 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         meta = self.state_store.load_issue_meta(issue_key)
         self.assertEqual("In Progress", meta["status"])
         self.assertEqual("running", meta["runtime_status"])
+
+    async def test_restore_pending_runs_updates_project_state_when_in_progress_run_is_missing(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="In Progress")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="running",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.client.github_client = MagicMock()
+        self.client.github_client.update_issue_state.return_value = None
+
+        await self.client._restore_pending_runs()
+
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("Rework", meta["status"])
+        self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Rework")
