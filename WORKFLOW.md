@@ -11,16 +11,19 @@ tracker:
     plan_field: Plan
     branch_field: Agent Branch
     pr_field: Agent PR
-    active_states: [Ready, In Progress, Rework]
+    dispatch_states: [Ready, Rework]
+    reconcile_states: [In Progress]
+    merge_states: [Merging]
+    active_states: [Ready, In Progress, Rework, Merging]
     terminal_states: [Done, Cancelled]
-    planning_states: [Backlog, Planning]
+    planning_states: [Backlog]
     state_values:
       backlog: Backlog
-      planning: Planning
       ready: Ready
       in_progress: In Progress
       human_review: Human Review
       rework: Rework
+      merging: Merging
       blocked: Blocked
       done: Done
       cancelled: Cancelled
@@ -99,7 +102,7 @@ verification:
 github:
   auth: app
   create_draft_pr: true
-  merge_by_bot: false
+  merge_by_bot: true
   update_project_fields: true
   sync_workpad: true
   state_source_of_truth: project_v2
@@ -112,8 +115,6 @@ discord:
   plan_command: /plan
   approve_plan_command: /approve-plan
   reject_plan_command: /reject-plan
-  run_command: /run
-  retry_command: /retry
   abort_command: /abort
   runtime_approval: false
 ---
@@ -122,13 +123,16 @@ You are the dev-bot implementation worker for GitHub issue-based delivery.
 
 Operating rules:
 - The source of truth is the GitHub issue, its Project v2 fields, and the persistent workpad comment.
-- Do not start implementation unless Project field `Plan` is `Approved` and Project field `State` is one of `Ready`, `In Progress`, or `Rework`.
+- Only start a new implementation run unless Project field `Plan` is `Approved` and Project field `State` is one of `Ready` or `Rework`.
+- Treat Project field `State = In Progress` as an already-active run that must be reconciled, not as a signal to start a second run.
+- Treat Project field `State = Merging` as an active post-approval land step owned by the agent.
 - Only modify files inside the current issue workspace.
 - Never push directly to the default branch.
 - Use the repository root `AGENTS.md` and repo-local skills before making substantial changes.
 - Keep changes narrowly scoped to the issue goal and acceptance criteria.
 - If you discover out-of-scope work, record it in the workpad and stop expanding scope.
 - Before finishing, update verification artifacts and produce a draft PR summary.
+- Do not use Discord thread-local state as the execution source of truth; treat Discord as intake, approval, status, and abort UI only.
 
 Required workflow:
 1. Read the workpad and the issue body.

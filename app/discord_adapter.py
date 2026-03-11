@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -160,7 +162,7 @@ from app.planning_agent import PlanningAgent
 from app.process_registry import ProcessRegistry
 from app.repo_profiler import build_repo_profile
 from app.requirements_agent import RequirementsAgent
-from app.run_request import ensure_issue_and_enqueue
+from app.run_request import enqueue_issue_run, ensure_issue_for_thread
 from app.state_store import FileStateStore
 
 DERIVED_ARTIFACTS = (
@@ -205,6 +207,8 @@ class DevBotClient(discord.Client):
             project_id=getattr(settings, "github_project_id", ""),
             project_state_field_id=getattr(settings, "github_project_state_field_id", ""),
             project_state_option_ids=getattr(settings, "github_project_state_option_ids", ""),
+            project_plan_field_id=getattr(settings, "github_project_plan_field_id", ""),
+            project_plan_option_ids=getattr(settings, "github_project_plan_option_ids", ""),
         )
         self.process_registry = ProcessRegistry(settings.runs_root)
         self.approval_coordinator = ApprovalCoordinator(state_store)
@@ -219,21 +223,28 @@ class DevBotClient(discord.Client):
             state_store=state_store,
             executor=lambda item: self.pipeline.execute_run(
                 client=self,
-                thread_id=item.thread_id,
+                thread_id=item.thread_id or int(self.state_store.thread_id_for_issue(item.issue_key) or 0),
                 repo_full_name=item.repo_full_name,
                 issue=item.issue,
             ),
             max_concurrency=settings.max_concurrent_runs,
         )
+        self._scheduler_task: asyncio.Task[None] | None = None
+        self._scheduler_tick_lock = asyncio.Lock()
         self.tree = app_commands.CommandTree(self)
 
     def build_approval_view(self) -> discord.ui.View:
         return ApprovalView(self)
 
+    async def _run_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        bound = partial(func, *args, **kwargs)
+        return await asyncio.to_thread(bound)
+
     async def setup_hook(self) -> None:
         for name, description, callback, needs_repo in (
             ("plan", "repo を読んで plan.json と test_plan.json を作成します", self.plan_command, True),
-            ("run", "確認済み plan に基づいて Issue 作成と実装を開始します", self.run_command, True),
+            ("approve-plan", "計画を承認して Issue 化と実装開始を行います", self.approve_plan_command, False),
+            ("reject-plan", "計画を却下して修正要求状態に戻します", self.reject_plan_command, False),
             ("confirm", "互換コマンドです。/plan と同じく計画を作成します", self.confirm_command, True),
         ):
             command = app_commands.Command(name=name, description=description, callback=callback)
@@ -249,7 +260,6 @@ class DevBotClient(discord.Client):
             ("approve", "保留中の高リスク操作を承認します", self.approve_command),
             ("reject", "保留中の高リスク操作を拒否します", self.reject_command),
             ("abort", "このスレッドの実行中プロセスを停止します", self.abort_command),
-            ("retry", "直前の plan / issue で再実行します", self.retry_command),
             ("revise", "要件整理を再開し、plan/run の派生成果物をクリアします", self.revise_command),
             ("diff", "現在の作業差分を表示します", self.diff_command),
             ("why-failed", "直近の失敗理由を要約します", self.why_failed_command),
@@ -270,6 +280,7 @@ class DevBotClient(discord.Client):
         self.add_view(self.build_approval_view())
         asyncio.create_task(self._warm_repo_autocomplete_cache())
         await self._restore_pending_runs()
+        self._ensure_scheduler_started()
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -297,7 +308,7 @@ class DevBotClient(discord.Client):
         self.state_store.create_run(thread_id=thread.id, parent_message_id=message.id, channel_id=message.channel.id)
         user_payload = await self._materialize_message_payload(thread.id, message, parsed)
         self.state_store.append_message(thread.id, "user", user_payload)
-        reply = await asyncio.to_thread(self.requirements_agent.build_reply, thread.id)
+        reply = await self._run_blocking(self.requirements_agent.build_reply, thread.id)
         await self._send_channel_text(thread, reply.body)
         self.state_store.append_message(thread.id, "assistant", reply.body)
         self.state_store.update_status(thread.id, reply.status)
@@ -312,20 +323,36 @@ class DevBotClient(discord.Client):
             return
         self._reconcile_thread_runtime_state(thread_id)
         meta = self.state_store.load_meta(thread_id)
-        if str(meta.get("status", "")) in {"planning", "queued", "running", "verifying", "awaiting_high_risk_approval"}:
+        runtime_status = str(meta.get("runtime_status", "")).strip()
+        has_process = bool(self.process_registry.load(self._runtime_key(thread_id)))
+        if (
+            str(meta.get("status", "")) == "planning"
+            or runtime_status
+            in {
+                "queued",
+                "running",
+                "verifying",
+                "awaiting_high_risk_approval",
+            }
+            or (str(meta.get("status", "")).strip() == "In Progress" and has_process)
+        ):
             return
         parsed = await self._parse_message_inputs(message)
         if parsed["error"]:
             await self._send_channel_text(message.channel, str(parsed["error"]))
             return
-        if meta.get("status") in {"planned", "queued", "running", "completed", "failed", "aborted"}:
+        if meta.get("status") in {"awaiting_approval", "Blocked", "Cancelled", "Done"}:
             self._clear_execution_artifacts(thread_id)
         user_payload = await self._materialize_message_payload(thread_id, message, parsed)
         self.state_store.append_message(thread_id, "user", user_payload)
-        reply = await asyncio.to_thread(self.requirements_agent.build_reply, thread_id)
+        reply = await self._run_blocking(self.requirements_agent.build_reply, thread_id)
         await self._send_channel_text(message.channel, reply.body)
         self.state_store.append_message(thread_id, "assistant", reply.body)
-        self.state_store.update_status(thread_id, reply.status)
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if issue_key and reply.status in {"requirements_dialogue", "ready_for_confirmation", "requirements_error"}:
+            self.state_store.update_draft_meta(thread_id, status=reply.status)
+        else:
+            self.state_store.update_status(thread_id, reply.status)
         if reply.artifacts:
             self._persist_artifacts(thread_id, reply.artifacts)
 
@@ -346,6 +373,9 @@ class DevBotClient(discord.Client):
         if not isinstance(channel, discord.Thread):
             return None
         return channel.id if self.state_store.has_run(channel.id) else None
+
+    def _runtime_key(self, thread_id: int) -> str | int:
+        return self.state_store.issue_key_for_thread(thread_id) or thread_id
 
     def _build_thread_name(self, content: str) -> str:
         summary = content.replace("\n", " ").strip()
@@ -404,19 +434,33 @@ class DevBotClient(discord.Client):
     def _chunk_message(self, content: str) -> list[str]:
         return chunk_message(content, max_length=MAX_DISCORD_MESSAGE_LENGTH)
 
+    async def _update_bound_issue_state(self, thread_id: int, state: str) -> None:
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if not issue_key:
+            return
+        meta = self.state_store.load_issue_meta(issue_key)
+        repo_full_name = str(meta.get("github_repo", "")).strip()
+        issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+        if not repo_full_name or issue_number <= 0:
+            return
+        await self._run_blocking(self.github_client.update_issue_state, repo_full_name, issue_number, state)
+
     async def plan_command(self, interaction: discord.Interaction, repo: str) -> None:
         await self._generate_plan(interaction, repo, alias_used=False)
 
     async def confirm_command(self, interaction: discord.Interaction, repo: str) -> None:
         await self._generate_plan(interaction, repo, alias_used=True)
 
-    async def run_command(self, interaction: discord.Interaction, repo: str | None = None) -> None:
-        await self._start_run(interaction, repo)
+    async def approve_plan_command(self, interaction: discord.Interaction) -> None:
+        await self._promote_approved_plan(interaction)
+
+    async def reject_plan_command(self, interaction: discord.Interaction) -> None:
+        await self._reject_plan(interaction)
 
     async def repos_command(self, interaction: discord.Interaction, query: str | None = None) -> None:
         await interaction.response.defer(thinking=True, ephemeral=True)
         try:
-            repos = await asyncio.to_thread(self._list_repositories_for_display, query or "")
+            repos = await self._run_blocking(self._list_repositories_for_display, query or "")
         except Exception as exc:
             await self._send_followup_text(interaction, f"repository 一覧の取得に失敗しました: `{exc}`", ephemeral=True)
             return
@@ -449,18 +493,26 @@ class DevBotClient(discord.Client):
             )
             return
         self._reconcile_thread_runtime_state(thread_id)
-        meta = self.state_store.load_meta(thread_id)
-        issue = self.state_store.load_artifact(thread_id, "issue.json")
-        pr = self.state_store.load_artifact(thread_id, "pr.json")
+        runtime_key = self._runtime_key(thread_id)
+        meta = self.state_store.load_meta(runtime_key)
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if issue_key:
+            draft_meta = self.state_store.load_draft_meta(thread_id)
+            draft_status = str(draft_meta.get("status", "")).strip()
+            if draft_status in {"requirements_dialogue", "ready_for_confirmation", "requirements_error"}:
+                meta = dict(meta)
+                meta["status"] = draft_status
+        issue = self.state_store.load_artifact(runtime_key, "issue.json")
+        pr = self.state_store.load_artifact(runtime_key, "pr.json")
         summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
         plan = self.state_store.load_artifact(thread_id, "plan.json")
         test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
-        verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
-        review = self.state_store.load_artifact(thread_id, "review_summary.json")
-        pending_approval = self.state_store.load_artifact(thread_id, "pending_approval.json")
+        verification = self.state_store.load_artifact(runtime_key, "verification_summary.json")
+        review = self.state_store.load_artifact(runtime_key, "review_summary.json")
+        pending_approval = self.state_store.load_artifact(runtime_key, "pending_approval.json")
         planning_progress = self.state_store.load_artifact(thread_id, "planning_progress.json")
-        current_activity = self.state_store.load_artifact(thread_id, "current_activity.json")
-        process = self.process_registry.load(thread_id)
+        current_activity = self.state_store.load_artifact(runtime_key, "current_activity.json")
+        process = self.process_registry.load(runtime_key)
         runtime_active = (
             self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id) or bool(process)
         )
@@ -508,7 +560,7 @@ class DevBotClient(discord.Client):
                 "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
             )
             return
-        pr = self.state_store.load_artifact(thread_id, "pr.json")
+        pr = self.state_store.load_artifact(self._runtime_key(thread_id), "pr.json")
         if not pr:
             await interaction.response.send_message("まだ PR は作成されていません。", ephemeral=True)
             return
@@ -538,26 +590,6 @@ class DevBotClient(discord.Client):
     async def reject_command(self, interaction: discord.Interaction) -> None:
         await self._resolve_approval(interaction, approved=False)
 
-    async def retry_command(self, interaction: discord.Interaction) -> None:
-        thread_id = self._ensure_managed_thread(interaction.channel)
-        if thread_id is None:
-            await interaction.response.send_message(
-                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
-            )
-            return
-        verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
-        failure_type = str(verification.get("failure_type", "")) if isinstance(verification, dict) else ""
-        if failure_type and failure_type not in {"test_failure", "command_failure", "transient_tool_error"}:
-            await interaction.response.send_message(
-                f"この失敗分類 `{failure_type}` は自動 retry 対象外です。",
-                ephemeral=True,
-            )
-            return
-        issue = self.state_store.load_artifact(thread_id, "issue.json")
-        meta = self.state_store.load_meta(thread_id)
-        repo = issue.get("repo_full_name") if isinstance(issue, dict) else meta.get("github_repo")
-        await self._start_run(interaction, str(repo) if repo else None)
-
     async def revise_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
@@ -569,16 +601,27 @@ class DevBotClient(discord.Client):
             await interaction.response.send_message("実行中です。先に `/abort` してください。", ephemeral=True)
             return
         self._clear_execution_artifacts(thread_id)
-        self.state_store.update_meta(
-            thread_id,
-            status="requirements_dialogue",
-            issue_number="",
-            pr_number="",
-            pr_url="",
-            workspace="",
-            branch_name="",
-            base_branch="",
-        )
+        runtime_key = self._runtime_key(thread_id)
+        if runtime_key == thread_id:
+            fields: dict[str, Any] = {
+                "status": "requirements_dialogue",
+                "pr_number": "",
+                "pr_url": "",
+                "workspace": "",
+                "branch_name": "",
+                "base_branch": "",
+            }
+            fields["issue_number"] = ""
+        else:
+            self.state_store.update_draft_meta(thread_id, status="requirements_dialogue")
+            fields = {
+                "pr_number": "",
+                "pr_url": "",
+                "workspace": "",
+                "branch_name": "",
+                "base_branch": "",
+            }
+        self.state_store.update_meta(runtime_key, **fields)
         await interaction.response.send_message("要件整理を再開しました。修正内容を投稿してください。", ephemeral=True)
 
     async def diff_command(self, interaction: discord.Interaction, pathspec: str | None = None) -> None:
@@ -588,13 +631,13 @@ class DevBotClient(discord.Client):
                 "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
             )
             return
-        meta = self.state_store.load_meta(thread_id)
+        meta = self.state_store.load_meta(self._runtime_key(thread_id))
         workspace = str(meta.get("workspace", "")).strip()
         if not workspace or not Path(workspace).exists():
             await interaction.response.send_message("workspace が見つかりません。", ephemeral=True)
             return
         try:
-            diff_text = await asyncio.to_thread(self._build_diff_summary, workspace, pathspec or "")
+            diff_text = await self._run_blocking(self._build_diff_summary, workspace, pathspec or "")
         except subprocess.CalledProcessError as exc:
             await interaction.response.send_message(f"diff の取得に失敗しました: `{exc}`", ephemeral=True)
             return
@@ -607,9 +650,10 @@ class DevBotClient(discord.Client):
                 "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
             )
             return
-        last_failure = self.state_store.load_artifact(thread_id, "last_failure.json")
-        verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
-        final_result = self.state_store.load_artifact(thread_id, "final_result.json")
+        runtime_key = self._runtime_key(thread_id)
+        last_failure = self.state_store.load_artifact(runtime_key, "last_failure.json")
+        verification = self.state_store.load_artifact(runtime_key, "verification_summary.json")
+        final_result = self.state_store.load_artifact(runtime_key, "final_result.json")
         await self._send_interaction_text(
             interaction,
             format_why_failed_message(
@@ -627,12 +671,13 @@ class DevBotClient(discord.Client):
                 "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
             )
             return
-        final_result = self.state_store.load_artifact(thread_id, "final_result.json")
-        verification = self.state_store.load_artifact(thread_id, "verification_summary.json")
+        runtime_key = self._runtime_key(thread_id)
+        final_result = self.state_store.load_artifact(runtime_key, "final_result.json")
+        verification = self.state_store.load_artifact(runtime_key, "verification_summary.json")
         await self._send_interaction_text(
             interaction,
             format_budget_message(
-                attempt_count=int(self.state_store.load_meta(thread_id).get("attempt_count", 0)),
+                attempt_count=int(self.state_store.load_meta(runtime_key).get("attempt_count", 0)),
                 verification=verification,
                 final_result=final_result,
             ),
@@ -646,7 +691,7 @@ class DevBotClient(discord.Client):
             return [app_commands.Choice(name=repo, value=repo) for repo in cached]
         try:
             repos = await asyncio.wait_for(
-                asyncio.to_thread(self.github_client.suggest_repositories, current, 25),
+                self._run_blocking(self.github_client.suggest_repositories, current, 25),
                 timeout=1.5,
             )
         except Exception as exc:
@@ -657,10 +702,461 @@ class DevBotClient(discord.Client):
 
     async def _warm_repo_autocomplete_cache(self) -> None:
         try:
-            await asyncio.to_thread(self.github_client.warm_repository_cache)
+            await self._run_blocking(self.github_client.warm_repository_cache)
         except Exception as exc:
             logger.warning("repo_autocomplete: cache warm failed: %s", exc)
             return
+
+    def _ensure_scheduler_started(self) -> None:
+        if self._scheduler_task and not self._scheduler_task.done():
+            return
+        self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+
+    async def _scheduler_loop(self) -> None:
+        interval = max(1, int(getattr(self.settings, "scheduler_poll_interval_seconds", 15)))
+        while True:
+            try:
+                await self._scheduler_tick()
+            except Exception as exc:
+                logger.warning("scheduler tick failed: %s", exc)
+            await asyncio.sleep(interval)
+
+    async def _scheduler_tick(self) -> None:
+        async with self._scheduler_tick_lock:
+            metas = await self._run_blocking(self._sync_project_board_state)
+            for meta in metas:
+                issue_key = str(meta.get("issue_key", "")).strip()
+                thread_id_text = str(meta.get("thread_id", "")).strip()
+                repo_full_name = str(meta.get("github_repo", "")).strip()
+                issue_number_text = str(meta.get("issue_number", "")).strip()
+                status = str(meta.get("status", "")).strip()
+                if not issue_key or not repo_full_name or not issue_number_text:
+                    continue
+                thread_id = int(thread_id_text) if thread_id_text else 0
+                issue_number = int(issue_number_text)
+                if thread_id <= 0 and status not in {"Done", "Cancelled"}:
+                    thread_id = await self._ensure_issue_thread_binding(issue_key)
+                    if thread_id > 0:
+                        meta = self.state_store.load_issue_meta(issue_key)
+                        thread_id_text = str(meta.get("thread_id", "")).strip()
+                if status in {"Ready", "Rework"}:
+                    await self._dispatch_issue_if_ready(
+                        thread_id=thread_id,
+                        issue_key=issue_key,
+                        repo_full_name=repo_full_name,
+                        issue_number=issue_number,
+                        expected_state=status,
+                    )
+                    continue
+                if status == "In Progress":
+                    self._reconcile_runtime_state(issue_key if thread_id <= 0 else thread_id, thread_id=thread_id)
+                    continue
+                if status == "Merging":
+                    await self._process_merging_issue(
+                        issue_key=issue_key,
+                        thread_id=thread_id,
+                        repo_full_name=repo_full_name,
+                        issue_number=issue_number,
+                    )
+
+    def _sync_project_board_state(self) -> list[dict[str, Any]]:
+        try:
+            project_issues = self.github_client.list_project_issues()
+        except Exception as exc:
+            logger.warning("scheduler project sync failed: %s", exc)
+            return []
+
+        if not project_issues:
+            logger.warning("scheduler project sync returned no items; skipping scheduler actions")
+            return []
+
+        synced_issue_keys: list[str] = []
+        for project_issue in project_issues:
+            repo_full_name = str(project_issue.get("repo_full_name", "")).strip()
+            issue_number = int(project_issue.get("number", 0) or 0)
+            state = str(project_issue.get("state", "")).strip()
+            plan = str(project_issue.get("plan", "")).strip()
+            if not repo_full_name or issue_number <= 0:
+                continue
+            issue_key = f"{repo_full_name}#{issue_number}"
+            synced_issue_keys.append(issue_key)
+            issue_meta = self.state_store.load_issue_meta(issue_key)
+            if not issue_meta:
+                self.state_store.create_issue_record(
+                    issue_key,
+                    status=state or "Backlog",
+                )
+            self.state_store.update_issue_meta(
+                issue_key,
+                status=state or str(self.state_store.load_issue_meta(issue_key).get("status", "")),
+                plan_state=plan,
+                github_repo=repo_full_name,
+                issue_number=str(issue_number),
+            )
+            self.state_store.write_artifact(
+                issue_key,
+                "issue.json",
+                {
+                    "repo_full_name": repo_full_name,
+                    "number": issue_number,
+                    "title": str(project_issue.get("title", "") or ""),
+                    "body": str(project_issue.get("body", "") or ""),
+                    "url": str(project_issue.get("url", "") or ""),
+                    "state": str(project_issue.get("issue_state", "") or ""),
+                },
+            )
+        return [self.state_store.load_issue_meta(issue_key) for issue_key in synced_issue_keys]
+
+    async def _dispatch_issue_if_ready(
+        self,
+        *,
+        thread_id: int,
+        issue_key: str,
+        repo_full_name: str,
+        issue_number: int,
+        expected_state: str,
+    ) -> None:
+        if thread_id <= 0:
+            thread_id = await self._ensure_issue_thread_binding(issue_key)
+            if thread_id <= 0:
+                return
+        if self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id):
+            return
+        if self.process_registry.is_active(issue_key):
+            return
+        if not self._has_planning_artifacts(thread_id):
+            logger.info("scheduler skip: planning artifacts missing for %s", issue_key)
+            return
+        project_enabled = bool(str(getattr(self.settings, "github_project_id", "")).strip())
+        if project_enabled:
+            gate = await self._run_blocking(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
+            if gate.get("state") != expected_state or gate.get("plan") != "Approved":
+                return
+        issue = self.state_store.load_artifact(issue_key, "issue.json")
+        if not isinstance(issue, dict) or not issue:
+            issue = self.state_store.load_artifact(thread_id, "issue.json")
+        if not isinstance(issue, dict) or not issue:
+            return
+        issue_state = str(issue.get("state", "")).strip().upper()
+        if issue_state == "CLOSED":
+            logger.info("scheduler skip: issue is closed for %s", issue_key)
+            return
+        await enqueue_issue_run(
+            thread_id=thread_id,
+            repo_full_name=repo_full_name,
+            issue=issue,
+            issue_key=issue_key,
+            orchestrator=self.orchestrator,
+        )
+
+    async def _ensure_issue_thread_binding(self, issue_key: str) -> int:
+        existing = str(self.state_store.thread_id_for_issue(issue_key)).strip()
+        if existing:
+            return int(existing)
+        status_channel_id = str(getattr(self.settings, "discord_status_channel_id", "")).strip()
+        if not status_channel_id:
+            return 0
+        channel = self.get_channel(int(status_channel_id))
+        if channel is None or not hasattr(channel, "create_thread"):
+            logger.warning("status channel is unavailable for issue mirror: %s", issue_key)
+            return 0
+        issue = self.state_store.load_artifact(issue_key, "issue.json")
+        if not isinstance(issue, dict) or not issue:
+            meta = self.state_store.load_issue_meta(issue_key)
+            issue = {
+                "repo_full_name": str(meta.get("github_repo", "")),
+                "number": int(str(meta.get("issue_number", "0")).strip() or 0),
+                "title": issue_key,
+                "url": "",
+            }
+        thread_name = self._issue_thread_name(issue)
+        thread = await channel.create_thread(name=thread_name, auto_archive_duration=1440)
+        thread_id = int(getattr(thread, "id", 0) or 0)
+        if thread_id <= 0:
+            return 0
+        self.state_store.bind_thread(thread_id, issue_key)
+        self.state_store.update_issue_meta(
+            issue_key,
+            thread_id=str(thread_id),
+            channel_id=status_channel_id,
+        )
+        await self._post_issue_mirror_summary(thread, issue_key, issue)
+        return thread_id
+
+    def _issue_thread_name(self, issue: dict[str, Any]) -> str:
+        repo = str(issue.get("repo_full_name", "")).split("/")[-1]
+        number = str(issue.get("number", "")).strip()
+        title = str(issue.get("title", "")).replace("\n", " ").strip()
+        if len(title) > 60:
+            title = title[:60].rstrip() + "..."
+        return f"dev-bot | {repo}#{number} | {title or 'issue'}"
+
+    async def _post_issue_mirror_summary(
+        self, thread: discord.Thread | Any, issue_key: str, issue: dict[str, Any]
+    ) -> None:
+        summary_bootstrapped = self._bootstrap_issue_summary(issue_key, issue)
+        conversation_bootstrapped = self._bootstrap_issue_conversation(issue_key, issue)
+        meta = self.state_store.load_issue_meta(issue_key)
+        state = str(meta.get("status", "")).strip() or "unknown"
+        plan = str(meta.get("plan_state", "")).strip() or "unknown"
+        plan_hint = (
+            "\n- requirement_summary を issue body から初期化しました。必要なら補足して `/plan` を実行してください。"
+            if summary_bootstrapped
+            else ""
+        )
+        conversation_hint = (
+            "\n- issue 本文を会話履歴の初期入力として取り込みました。追加要件はこの thread に返信してください。"
+            if conversation_bootstrapped
+            else ""
+        )
+        await thread.send(
+            "GitHub Issue を status mirror thread に同期しました。\n"
+            f"- Issue: `{issue_key}`\n"
+            f"- Title: {issue.get('title', '')}\n"
+            f"- URL: {issue.get('url', '')}\n"
+            f"- State: `{state}`\n"
+            f"- Plan: `{plan}`"
+            f"{plan_hint}"
+            f"{conversation_hint}"
+        )
+
+    def _bootstrap_issue_summary(self, issue_key: str, issue: dict[str, Any]) -> bool:
+        existing = self.state_store.load_artifact(issue_key, "requirement_summary.json")
+        if isinstance(existing, dict) and existing:
+            return False
+        summary = self._summary_from_issue(issue)
+        self.state_store.write_artifact(issue_key, "requirement_summary.json", summary)
+        return True
+
+    def _bootstrap_issue_conversation(self, issue_key: str, issue: dict[str, Any]) -> bool:
+        conversation_path = self.state_store.entity_dir(issue_key) / "conversation.jsonl"
+        if conversation_path.exists() and conversation_path.read_text(encoding="utf-8").strip():
+            return False
+        title = str(issue.get("title", "")).strip()
+        body = str(issue.get("body", "")).strip()
+        content_lines = [
+            "GitHub issue から初期化した要件です。",
+            f"Title: {title or '(no title)'}",
+        ]
+        if body:
+            content_lines.extend(["", body])
+        self.state_store.append_message(issue_key, "user", "\n".join(content_lines).strip())
+        return True
+
+    def _summary_from_issue(self, issue: dict[str, Any]) -> dict[str, Any]:
+        body = str(issue.get("body", "") or "")
+        title = str(issue.get("title", "") or "").strip()
+        goal = self._issue_section_text(body, "目的") or title
+        in_scope = self._issue_section_list(body, "やること") or ([goal] if goal else [])
+        acceptance = self._issue_section_list(body, "受け入れ条件") or ([goal] if goal else [])
+        return {
+            "background": self._issue_section_text(body, "背景"),
+            "goal": goal,
+            "in_scope": in_scope,
+            "out_of_scope": self._issue_section_list(body, "やらないこと"),
+            "acceptance_criteria": acceptance,
+            "constraints": self._issue_section_list(body, "制約"),
+            "test_focus": self._issue_section_list(body, "テスト観点"),
+            "open_questions": self._issue_section_list(body, "未確定事項"),
+        }
+
+    def _issue_section_text(self, body: str, heading: str) -> str:
+        match = self._issue_section_body(body, heading)
+        return match.strip() if match else ""
+
+    def _issue_section_list(self, body: str, heading: str) -> list[str]:
+        section = self._issue_section_body(body, heading)
+        if not section:
+            return []
+        items: list[str] = []
+        for line in section.splitlines():
+            text = line.strip()
+            if text.startswith("- "):
+                text = text[2:].strip()
+            if text:
+                items.append(text)
+        return items
+
+    def _issue_section_body(self, body: str, heading: str) -> str:
+        marker = f"## {heading}"
+        if marker not in body:
+            return ""
+        after = body.split(marker, 1)[1]
+        next_heading = after.find("\n## ")
+        section = after[:next_heading] if next_heading >= 0 else after
+        return section.strip()
+
+    def _has_planning_artifacts(self, thread_id: int) -> bool:
+        summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
+        plan = self.state_store.load_artifact(thread_id, "plan.json")
+        test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
+        return (
+            isinstance(summary, dict)
+            and bool(summary)
+            and isinstance(plan, dict)
+            and bool(plan)
+            and isinstance(test_plan, dict)
+            and bool(test_plan)
+        )
+
+    def _scheduler_gate_for_issue(self, repo_full_name: str, issue_number: int, issue_key: str) -> dict[str, str]:
+        try:
+            gate = self.github_client.get_issue_project_fields(repo_full_name, issue_number)
+        except Exception as exc:
+            logger.warning("scheduler gate lookup failed for %s: %s", issue_key, exc)
+            return {}
+        if gate.get("state") and gate.get("plan"):
+            return gate
+        logger.warning("scheduler gate incomplete for %s: %s", issue_key, gate)
+        return {}
+
+    async def _process_merging_issue(
+        self,
+        *,
+        issue_key: str,
+        thread_id: int,
+        repo_full_name: str,
+        issue_number: int,
+    ) -> None:
+        if self.process_registry.is_active(issue_key):
+            return
+        pr = self.state_store.load_artifact(issue_key, "pr.json")
+        if not isinstance(pr, dict) or not pr or not pr.get("number"):
+            await self._mark_merging_blocked(
+                issue_key, thread_id, repo_full_name, issue_number, "merge 対象の PR が見つかりません"
+            )
+            return
+        try:
+            pr_status = await self._run_blocking(
+                self.github_client.get_pull_request_status,
+                repo_full_name,
+                int(pr["number"]),
+            )
+        except Exception as exc:
+            await self._mark_merging_blocked(
+                issue_key, thread_id, repo_full_name, issue_number, f"PR status lookup failed: {exc}"
+            )
+            return
+        mergeable_state = str(pr_status.get("mergeable_state", "")).strip().lower()
+        if mergeable_state == "unknown":
+            logger.info("merge pending: mergeability is still unknown for %s", issue_key)
+            return
+        guard_failure = self._merge_guard_failure(pr, pr_status)
+        if guard_failure:
+            await self._mark_merging_blocked(issue_key, thread_id, repo_full_name, issue_number, guard_failure)
+            return
+        try:
+            result = await self._run_blocking(
+                self.github_client.merge_pull_request,
+                repo_full_name,
+                int(pr["number"]),
+            )
+        except Exception as exc:
+            await self._mark_merging_blocked(
+                issue_key, thread_id, repo_full_name, issue_number, f"PR merge failed: {exc}"
+            )
+            return
+        if not result.get("merged"):
+            message = str(result.get("message", "")).strip() or "GitHub merge API returned merged=false"
+            await self._mark_merging_blocked(issue_key, thread_id, repo_full_name, issue_number, message)
+            return
+        self.state_store.update_status(issue_key, "Done")
+        self.state_store.update_meta(issue_key, runtime_status="", merged_sha=str(result.get("sha", "")))
+        self.state_store.record_activity(
+            issue_key,
+            phase="merge",
+            summary="PR を merge して Done に遷移しました",
+            status="completed",
+            run_id=str(self.state_store.load_meta(issue_key).get("current_run_id", "")),
+            details={"thread_id": thread_id, "pr_number": pr.get("number"), "sha": result.get("sha", "")},
+        )
+        await self._run_blocking(
+            self._update_issue_workpad,
+            issue_key,
+            repo_full_name,
+            issue_number,
+            "Done",
+            "merge completed",
+            [],
+        )
+        channel = self.get_channel(thread_id)
+        if channel is not None and hasattr(channel, "send"):
+            await channel.send(
+                f"PR を merge しました。Done に更新しました。\n- PR: #{pr['number']}\n- URL: {pr.get('url', '')}"
+            )
+
+    def _merge_guard_failure(self, pr: dict[str, Any], pr_status: dict[str, Any]) -> str:
+        expected_head_sha = str(pr.get("head_sha", "")).strip()
+        actual_head_sha = str(pr_status.get("head_sha", "")).strip()
+        if expected_head_sha and actual_head_sha and expected_head_sha != actual_head_sha:
+            return f"head_sha_changed expected={expected_head_sha} actual={actual_head_sha}"
+        if bool(pr_status.get("draft")):
+            return "PR is still draft"
+        mergeable = pr_status.get("mergeable")
+        if mergeable is False:
+            return "PR is not mergeable"
+        mergeable_state = str(pr_status.get("mergeable_state", "")).strip().lower()
+        if mergeable_state and mergeable_state not in {"clean", "has_hooks"}:
+            return f"mergeable_state={mergeable_state}"
+        return ""
+
+    async def _mark_merging_blocked(
+        self,
+        issue_key: str,
+        thread_id: int,
+        repo_full_name: str,
+        issue_number: int,
+        reason: str,
+    ) -> None:
+        self.state_store.update_status(issue_key, "Blocked")
+        self.state_store.update_meta(issue_key, runtime_status="")
+        try:
+            await self._run_blocking(self.github_client.update_issue_state, repo_full_name, issue_number, "Blocked")
+        except Exception as exc:
+            logger.warning("merge blocked: failed to update project state for %s: %s", issue_key, exc)
+        self.state_store.record_activity(
+            issue_key,
+            phase="merge",
+            summary="merge 中の問題で Blocked に補正しました",
+            status="failed",
+            run_id=str(self.state_store.load_meta(issue_key).get("current_run_id", "")),
+            details={"thread_id": thread_id, "reason": reason},
+        )
+
+    def _update_issue_workpad(
+        self,
+        issue_key: str,
+        repo_full_name: str,
+        issue_number: int,
+        state: str,
+        latest_attempt: str,
+        blockers: list[str],
+    ) -> None:
+        issue = self.state_store.load_artifact(issue_key, "issue_snapshot.json")
+        if not isinstance(issue, dict) or not issue:
+            issue = self.state_store.load_artifact(issue_key, "issue.json")
+        summary = self.state_store.load_artifact(issue_key, "requirement_summary.json")
+        plan = self.state_store.load_artifact(issue_key, "plan.json")
+        test_plan = self.state_store.load_artifact(issue_key, "test_plan.json")
+        pr = self.state_store.load_artifact(issue_key, "pr.json")
+        verification = self.state_store.load_artifact(issue_key, "verification.json")
+        meta = self.state_store.load_meta(issue_key)
+        sections = self.pipeline._build_workpad_sections(
+            summary=summary if isinstance(summary, dict) else {},
+            plan=plan if isinstance(plan, dict) else {},
+            test_plan=test_plan if isinstance(test_plan, dict) else {},
+            issue=issue if isinstance(issue, dict) else {},
+            current_state=state,
+            latest_attempt=latest_attempt,
+            branch=str(meta.get("branch_name", "")),
+            pr=(f"draft #{pr.get('number')} {pr.get('url')}" if isinstance(pr, dict) and pr else "なし"),
+            verification=verification if isinstance(verification, dict) else {},
+            blockers=blockers,
+            artifacts=["pr.json", "verification.json", "final_summary.json"],
+            audit_trail=[f"{datetime.now(UTC).isoformat()} {latest_attempt}"],
+        )
+        self.github_client.update_issue_state(repo_full_name, issue_number, state)
+        self.github_client.upsert_workpad_comment(repo_full_name, issue_number, sections)
 
     async def _generate_plan(self, interaction: discord.Interaction, repo: str, *, alias_used: bool) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
@@ -680,7 +1176,7 @@ class DevBotClient(discord.Client):
         self.state_store.update_status(thread_id, "planning")
         self.state_store.write_artifact(thread_id, "planning_progress.json", {"status": "planning", "phase": "plan"})
         try:
-            artifacts = await asyncio.to_thread(self._build_plan_artifacts, repo, thread_id, summary)
+            artifacts = await self._run_blocking(self._build_plan_artifacts, repo, thread_id, summary)
         except Exception as exc:
             details = {"repo": repo}
             stderr: list[str] | None = None
@@ -787,36 +1283,34 @@ class DevBotClient(discord.Client):
         )
         self.state_store.update_meta(
             thread_id,
-            status="planned",
+            status="awaiting_approval",
+            plan_state="Drafted",
             github_repo=repo,
             base_branch=str(artifacts["planning_workspace"].get("base_branch", "")),
         )
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if issue_key:
+            issue_meta = self.state_store.load_issue_meta(issue_key)
+            issue_number = int(str(issue_meta.get("issue_number", "0")).strip() or 0)
+            issue_repo = str(issue_meta.get("github_repo", "")).strip() or repo
+            if issue_repo and issue_number:
+                try:
+                    await self._run_blocking(self.github_client.update_issue_plan, issue_repo, issue_number, "Drafted")
+                except Exception as exc:
+                    logger.warning("plan: failed to reset GitHub plan field for %s: %s", issue_key, exc)
+                self.state_store.update_issue_meta(issue_key, plan_state="Drafted")
         self.state_store.write_artifact(thread_id, "planning_progress.json", {"status": "completed", "phase": "done"})
         prefix = "互換コマンド `/confirm` を `/plan` として扱いました。\n\n" if alias_used else ""
         plan_message = prefix + self._format_plan_message(repo, artifacts["plan"], artifacts["test_plan"])
-        try:
-            issue = await self._enqueue_run_for_thread(
-                thread_id=thread_id, channel=interaction.channel, repo_full_name=repo
-            )
-        except (RuntimeError, ValueError) as exc:
-            await self._send_followup_text(
-                interaction,
-                plan_message + f"\n\n自動 `/run` の開始に失敗しました: `{exc}`",
-            )
-            return
 
         await self._send_followup_text(
             interaction,
             plan_message
-            + "\n\n自動で `/run` を開始しました。"
-            + f"\n- Repo: `{repo}`"
-            + f"\n- Issue: #{issue['number']}"
-            + f"\n- URL: {issue['url']}",
+            + "\n\n`/approve-plan` で Issue 化と実装開始、`/reject-plan` で差し戻しできます。"
+            + f"\n- Repo: `{repo}`",
         )
-        if isinstance(interaction.channel, discord.Thread):
-            await self._maybe_post_pending_approval(interaction.channel)
 
-    async def _start_run(self, interaction: discord.Interaction, repo: str | None) -> None:
+    async def _promote_approved_plan(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
             await interaction.response.send_message(
@@ -842,28 +1336,62 @@ class DevBotClient(discord.Client):
 
         meta = self.state_store.load_meta(thread_id)
         issue = self.state_store.load_artifact(thread_id, "issue.json")
-        repo_full_name = (
-            repo or (issue.get("repo_full_name") if isinstance(issue, dict) else "") or str(meta.get("github_repo", ""))
+        repo_full_name = (issue.get("repo_full_name") if isinstance(issue, dict) else "") or str(
+            meta.get("github_repo", "")
         )
         if not repo_full_name:
             await interaction.response.send_message(
-                "repo を決められませんでした。`/run repo:owner/repo` を指定してください。", ephemeral=True
+                "repo を決められませんでした。先に `/plan repo:owner/repo` を実行してください。", ephemeral=True
             )
             return
 
         await interaction.response.defer(thinking=True)
+        promoted_issue_key = ""
         try:
-            issue = await self._enqueue_run_for_thread(
+            issue = await ensure_issue_for_thread(
                 thread_id=thread_id,
-                channel=interaction.channel,
                 repo_full_name=repo_full_name,
+                state_store=self.state_store,
+                github_client=self.github_client,
+                thread_url=interaction.channel.jump_url if isinstance(interaction.channel, discord.Thread) else "",
             )
+            issue_key = self.state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
+            promoted_issue_key = issue_key
+            await self._run_blocking(self.github_client.add_issue_to_project, repo_full_name, int(issue["number"]))
+            await self._run_blocking(
+                self.github_client.update_issue_plan, repo_full_name, int(issue["number"]), "Approved"
+            )
+            await self._run_blocking(
+                self.github_client.update_issue_state, repo_full_name, int(issue["number"]), "Ready"
+            )
+            self.state_store.update_draft_meta(thread_id, status="promoted", issue_key=issue_key)
+            self.state_store.update_issue_meta(
+                issue_key,
+                status="Ready",
+                plan_state="Approved",
+                github_repo=repo_full_name,
+                issue_number=str(issue["number"]),
+            )
+            if str(getattr(self.settings, "github_project_id", "")).strip():
+                await self._scheduler_tick()
+            else:
+                started = await enqueue_issue_run(
+                    thread_id=thread_id,
+                    repo_full_name=repo_full_name,
+                    issue=issue,
+                    issue_key=issue_key,
+                    orchestrator=self.orchestrator,
+                )
+                if not started:
+                    raise RuntimeError("パイプラインの起動に失敗しました。")
         except (RuntimeError, ValueError) as exc:
+            if promoted_issue_key or self.state_store.issue_key_for_thread(thread_id):
+                self.state_store.update_draft_meta(thread_id, status="promotion_failed")
             await self._send_followup_text(interaction, str(exc), ephemeral=True)
             return
         await self._send_followup_text(
             interaction,
-            "run を queue に登録しました。\n"
+            "plan を承認し、Issue 化して queue に登録しました。\n"
             f"- Repo: `{repo_full_name}`\n"
             f"- Issue: #{issue['number']}\n"
             f"- URL: {issue['url']}",
@@ -871,21 +1399,39 @@ class DevBotClient(discord.Client):
         if isinstance(interaction.channel, discord.Thread):
             await self._maybe_post_pending_approval(interaction.channel)
 
-    async def _enqueue_run_for_thread(
-        self,
-        *,
-        thread_id: int,
-        channel: discord.abc.GuildChannel | discord.Thread | None,
-        repo_full_name: str,
-    ) -> dict[str, Any]:
-        thread_url = channel.jump_url if isinstance(channel, discord.Thread) else ""
-        return await ensure_issue_and_enqueue(
-            thread_id=thread_id,
-            repo_full_name=repo_full_name,
-            state_store=self.state_store,
-            github_client=self.github_client,
-            orchestrator=self.orchestrator,
-            thread_url=thread_url,
+    async def _reject_plan(self, interaction: discord.Interaction) -> None:
+        thread_id = self._ensure_managed_thread(interaction.channel)
+        if thread_id is None:
+            await interaction.response.send_message(
+                "このコマンドは管理対象スレッド内で実行してください。", ephemeral=True
+            )
+            return
+        plan = self.state_store.load_artifact(thread_id, "plan.json")
+        if not isinstance(plan, dict) or not plan:
+            await interaction.response.send_message(
+                "却下する plan がありません。先に `/plan` を実行してください。", ephemeral=True
+            )
+            return
+        self.state_store.update_draft_meta(thread_id, status="changes_requested")
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if issue_key:
+            meta = self.state_store.load_meta(issue_key)
+            repo_full_name = str(meta.get("github_repo", "")).strip()
+            issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+            if repo_full_name and issue_number:
+                try:
+                    await self._run_blocking(
+                        self.github_client.update_issue_plan,
+                        repo_full_name,
+                        issue_number,
+                        "Changes Requested",
+                    )
+                except Exception as exc:
+                    logger.warning("reject-plan: failed to update GitHub plan field for %s: %s", issue_key, exc)
+            self.state_store.update_issue_meta(issue_key, plan_state="Changes Requested")
+        await interaction.response.send_message(
+            "plan を差し戻しました。追加の要件を投稿してから `/plan` を再実行してください。",
+            ephemeral=True,
         )
 
     def _build_plan_artifacts(self, repo: str, thread_id: int, summary: dict[str, Any]) -> dict[str, Any]:
@@ -924,23 +1470,51 @@ class DevBotClient(discord.Client):
         }
 
     def _reconcile_thread_runtime_state(self, thread_id: int) -> None:
-        meta = self.state_store.load_meta(thread_id)
-        status = str(meta.get("status", "")).strip()
-        if status not in {"queued", "running", "verifying", "awaiting_high_risk_approval"}:
+        self._reconcile_runtime_state(thread_id, thread_id=thread_id)
+
+    def _reconcile_runtime_state(self, identifier: str | int, *, thread_id: int = 0) -> None:
+        runtime_key = identifier if isinstance(identifier, str) else self._runtime_key(identifier)
+        meta = self.state_store.load_meta(runtime_key)
+        state = str(meta.get("status", "")).strip()
+        runtime_status = str(meta.get("runtime_status", "")).strip()
+        if state not in {"In Progress"} and runtime_status not in {
+            "queued",
+            "running",
+            "verifying",
+            "awaiting_high_risk_approval",
+        }:
             return
-        has_process = bool(self.process_registry.load(thread_id))
-        is_active = self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id) or has_process
-        if status == "awaiting_high_risk_approval":
-            pending = self.state_store.load_artifact(thread_id, "pending_approval.json")
+        has_process = self.process_registry.is_active(runtime_key) or (
+            thread_id > 0 and isinstance(runtime_key, str) and self.process_registry.is_active(thread_id)
+        )
+        is_active = (
+            (thread_id > 0 and self.orchestrator.is_running(thread_id))
+            or (thread_id > 0 and self.orchestrator.is_queued(thread_id))
+            or has_process
+        )
+        if runtime_status == "awaiting_high_risk_approval":
+            pending = self.state_store.load_artifact(runtime_key, "pending_approval.json")
             if isinstance(pending, dict) and pending.get("status") == "pending":
                 return
         if is_active:
+            if state == "In Progress" and has_process and not runtime_status:
+                self.state_store.update_meta(runtime_key, runtime_status="running")
             return
-        self.state_store.update_status(thread_id, "failed")
+        next_state = "Rework"
+        self.state_store.update_meta(runtime_key, runtime_status="")
+        self.state_store.update_status(runtime_key, next_state)
+        if isinstance(runtime_key, str):
+            repo_full_name = str(meta.get("github_repo", "")).strip()
+            issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+            if repo_full_name and issue_number:
+                try:
+                    self.github_client.update_issue_state(repo_full_name, issue_number, next_state)
+                except Exception as exc:
+                    logger.warning("runtime reconcile: failed to update project state for %s: %s", runtime_key, exc)
         self.state_store.record_activity(
-            thread_id,
+            runtime_key,
             phase="reconcile",
-            summary="実行状態と status の不整合を検出し failed に補正しました",
+            summary="実行状態と status の不整合を検出し補正しました",
             status="failed",
             run_id=str(meta.get("current_run_id", "")),
         )
@@ -949,10 +1523,39 @@ class DevBotClient(discord.Client):
         return format_plan_message(repo, plan, test_plan)
 
     def _clear_execution_artifacts(self, thread_id: int) -> None:
-        for filename in DERIVED_ARTIFACTS:
-            self.state_store.delete_artifact(thread_id, filename)
+        runtime_key = self._runtime_key(thread_id)
+        issue_bound = runtime_key != thread_id
+        runtime_artifacts = (
+            DERIVED_ARTIFACTS
+            if not issue_bound
+            else tuple(filename for filename in DERIVED_ARTIFACTS if filename != "issue.json")
+        )
+        for filename in runtime_artifacts:
+            self.state_store.delete_artifact(runtime_key, filename)
+        if issue_bound:
+            for filename in DERIVED_ARTIFACTS:
+                self.state_store.delete_draft_artifact(thread_id, filename)
+        if runtime_key != thread_id:
+            self.state_store.update_meta(
+                runtime_key,
+                pr_number="",
+                pr_url="",
+                workspace="",
+                branch_name="",
+                base_branch="",
+            )
+            self.state_store.update_draft_meta(
+                thread_id,
+                issue_number="",
+                pr_number="",
+                pr_url="",
+                workspace="",
+                branch_name="",
+                base_branch="",
+            )
+            return
         self.state_store.update_meta(
-            thread_id,
+            runtime_key,
             issue_number="",
             pr_number="",
             pr_url="",
@@ -998,16 +1601,18 @@ class DevBotClient(discord.Client):
             await interaction.response.send_message("承認待ちの解決に失敗しました。", ephemeral=True)
             return
         if approved:
-            meta = self.state_store.load_meta(thread_id)
+            runtime_key = self._runtime_key(thread_id)
+            meta = self.state_store.load_meta(runtime_key)
             issue = self.state_store.load_artifact(thread_id, "issue.json")
             repo_full_name = str(meta.get("github_repo", ""))
             if resolution != "resolved" and isinstance(issue, dict) and issue and repo_full_name:
-                self.state_store.update_status(thread_id, "queued")
+                self.state_store.update_meta(runtime_key, runtime_status="queued")
                 await self.orchestrator.enqueue(
                     WorkItem(
                         thread_id=thread_id,
                         repo_full_name=repo_full_name,
                         issue=issue,
+                        issue_key=f"{repo_full_name}#{issue.get('number')}",
                         workspace_key=f"{repo_full_name}#{issue.get('number')}",
                     )
                 )
@@ -1015,14 +1620,20 @@ class DevBotClient(discord.Client):
                     "高リスク操作を承認しました。run を再キューしました。", ephemeral=True
                 )
                 return
-            self.state_store.update_status(thread_id, "running")
+            self.state_store.update_meta(runtime_key, runtime_status="running")
             await interaction.response.send_message("高リスク操作を承認しました。run を再開します。", ephemeral=True)
             return
-        self.state_store.update_status(thread_id, "failed")
+        runtime_key = self._runtime_key(thread_id)
+        self.state_store.update_meta(runtime_key, runtime_status="")
+        self.state_store.update_status(runtime_key, "Blocked")
+        try:
+            await self._update_bound_issue_state(thread_id, "Blocked")
+        except Exception as exc:
+            logger.warning("reject approval: failed to update project state for thread %s: %s", thread_id, exc)
         await interaction.response.send_message("高リスク操作を拒否しました。run を停止します。", ephemeral=True)
 
     async def _maybe_post_pending_approval(self, thread: discord.Thread) -> None:
-        payload = self.state_store.load_artifact(thread.id, "pending_approval.json")
+        payload = self.state_store.load_artifact(self._runtime_key(thread.id), "pending_approval.json")
         if not isinstance(payload, dict) or payload.get("status") != "pending":
             return
         await thread.send(
@@ -1034,29 +1645,52 @@ class DevBotClient(discord.Client):
         )
 
     async def _restore_pending_runs(self) -> None:
-        metas = self.state_store.list_runs_by_status({"queued", "running", "awaiting_high_risk_approval"})
+        metas = self.state_store.list_runs_by_status({"Ready", "Rework", "In Progress", "Merging"})
         items: list[WorkItem] = []
         for meta in metas:
-            thread_id = int(meta["thread_id"])
-            issue = self.state_store.load_artifact(thread_id, "issue.json")
+            issue_key = str(meta.get("issue_key", ""))
+            thread_id_text = str(meta.get("thread_id", "")).strip()
+            if not issue_key or not thread_id_text:
+                continue
+            thread_id = int(thread_id_text)
+            issue = self.state_store.load_artifact(issue_key, "issue.json")
             repo_full_name = str(meta.get("github_repo", ""))
+            runtime_status = str(meta.get("runtime_status", "")).strip()
             if not isinstance(issue, dict) or not issue or not repo_full_name:
                 continue
-            if meta.get("status") == "awaiting_high_risk_approval":
+            if runtime_status == "awaiting_high_risk_approval":
                 channel = self.get_channel(thread_id)
                 if isinstance(channel, discord.Thread):
                     await self._maybe_post_pending_approval(channel)
                 continue
-            if meta.get("status") == "running":
-                if self.process_registry.load(thread_id):
-                    await asyncio.to_thread(self.process_registry.terminate, thread_id)
-                    self.process_registry.unregister(thread_id)
-                self.state_store.update_status(thread_id, "queued")
+            if str(meta.get("status")) == "In Progress":
+                if self.process_registry.is_active(issue_key):
+                    continue
+                self.state_store.update_status(issue_key, "Rework")
+                self.state_store.update_meta(issue_key, runtime_status="")
+                issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+                if repo_full_name and issue_number:
+                    try:
+                        await self._run_blocking(
+                            self.github_client.update_issue_state, repo_full_name, issue_number, "Rework"
+                        )
+                    except Exception as exc:
+                        logger.warning("restore: failed to update project state for %s: %s", issue_key, exc)
+                continue
+            if str(meta.get("status")) != "Ready" and str(meta.get("status")) != "Rework":
+                continue
+            issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+            project_enabled = bool(str(getattr(self.settings, "github_project_id", "")).strip())
+            if project_enabled and repo_full_name and issue_number:
+                gate = await self._run_blocking(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
+                if gate.get("state") not in {"Ready", "Rework"} or gate.get("plan") != "Approved":
+                    continue
             items.append(
                 WorkItem(
                     thread_id=thread_id,
                     repo_full_name=repo_full_name,
                     issue=issue,
+                    issue_key=issue_key,
                     workspace_key=f"{repo_full_name}#{issue.get('number')}",
                 )
             )

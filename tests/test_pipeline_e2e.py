@@ -17,6 +17,7 @@ from app.testing.in_memory_adapter import InMemoryAdapter
 from tests.helpers import make_test_issue, make_test_settings, setup_planning_artifacts
 
 THREAD_ID = 42
+ISSUE_KEY = "owner/repo#1"
 
 
 def _make_workspace_info(workspace: str) -> dict[str, Any]:
@@ -73,10 +74,18 @@ class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
         self.state_store = FileStateStore(self.state_dir)
         self.state_store.create_run(thread_id=THREAD_ID, parent_message_id=1, channel_id=2)
         setup_planning_artifacts(THREAD_ID, self.state_store)
+        self.state_store.bind_issue(THREAD_ID, "owner/repo", 1)
 
         self.github_client = MagicMock()
         self.github_client.get_issue_snapshot.return_value = make_test_issue()
         self.github_client.create_pull_request.return_value = _make_pr()
+        self.github_client.get_pull_request_status.return_value = {
+            "draft": True,
+            "mergeable": True,
+            "mergeable_state": "clean",
+            "head_sha": "headsha123",
+        }
+        self.github_client.ready_pull_request_for_review.return_value = {"ready_for_review": True}
         self.github_client.create_issue_comment.return_value = None
         self.github_client.update_issue_state.return_value = None
         self.github_client.upsert_workpad_comment.return_value = None
@@ -184,8 +193,11 @@ class TestFullSuccessPath(PipelineE2EBase):
         issue_comment_args = self.github_client.create_issue_comment.call_args.args
         self.assertIn("https://test.local/channels/42", issue_comment_args[2])
 
-        meta = self.state_store.load_meta(THREAD_ID)
-        self.assertEqual(meta.get("status"), "completed")
+        meta = self.state_store.load_meta(ISSUE_KEY)
+        self.assertEqual(meta.get("status"), "Human Review")
+        self.assertEqual("headsha123", self.state_store.load_artifact(ISSUE_KEY, "pr.json")["head_sha"])
+        self.github_client.ready_pull_request_for_review.assert_called_with("owner/repo", 99)
+        self.assertFalse(self.state_store.load_artifact(ISSUE_KEY, "pr.json")["draft"])
 
     async def test_message_order_in_success_path(self) -> None:
         with (
@@ -226,7 +238,7 @@ class TestCodexFailure(PipelineE2EBase):
             )
 
         self.adapter.assert_message_contains(THREAD_ID, "Codex 実装で失敗しました")
-        self.assertEqual(self.state_store.load_meta(THREAD_ID).get("status"), "failed")
+        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
 
 
 class TestVerificationFailure(PipelineE2EBase):
@@ -247,7 +259,7 @@ class TestVerificationFailure(PipelineE2EBase):
             )
 
         self.adapter.assert_message_contains(THREAD_ID, "verification が失敗しました")
-        self.assertEqual(self.state_store.load_meta(THREAD_ID).get("status"), "failed")
+        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
 
 
 class TestReviewReject(PipelineE2EBase):
@@ -270,7 +282,7 @@ class TestReviewReject(PipelineE2EBase):
             )
 
         self.adapter.assert_message_contains(THREAD_ID, "review が reject")
-        self.assertEqual(self.state_store.load_meta(THREAD_ID).get("status"), "failed")
+        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
 
 
 class TestNoChanges(PipelineE2EBase):
@@ -294,7 +306,7 @@ class TestNoChanges(PipelineE2EBase):
             )
 
         self.adapter.assert_message_contains(THREAD_ID, "変更差分が作られなかった")
-        self.assertEqual(self.state_store.load_meta(THREAD_ID).get("status"), "failed")
+        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
 
 
 class TestMissingArtifacts(PipelineE2EBase):
@@ -337,7 +349,7 @@ class TestMissingArtifacts(PipelineE2EBase):
             )
 
         self.adapter.assert_message_contains(THREAD_ID, "proof-of-work artifact が不足")
-        self.assertEqual(self.state_store.load_meta(THREAD_ID).get("status"), "failed")
+        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
 
 
 class TestPolicyViolation(PipelineE2EBase):
@@ -362,4 +374,4 @@ class TestPolicyViolation(PipelineE2EBase):
             )
 
         self.adapter.assert_message_contains(THREAD_ID, "禁止または高リスク")
-        self.assertEqual(self.state_store.load_meta(THREAD_ID).get("status"), "failed")
+        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Human Review")

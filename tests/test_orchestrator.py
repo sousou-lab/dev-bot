@@ -34,7 +34,8 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(started)
         self.assertFalse(duplicate)
-        self.assertEqual("queued", self.state_store.load_meta(1)["status"])
+        self.assertEqual("draft", self.state_store.load_meta(1)["status"])
+        self.assertEqual("queued", self.state_store.load_meta(1)["runtime_status"])
 
     async def test_restore_requeues_items(self) -> None:
         await self.orchestrator.restore(

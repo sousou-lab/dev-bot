@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.github_client import GitHubIssueClient, _parse_next_link, _parse_option_ids, render_workpad
 
@@ -122,6 +122,276 @@ class GitHubIssueClientTests(unittest.TestCase):
             repos = client._list_installation_repositories()
 
         self.assertEqual(["hayasesou/GO_piscine", "hayasesou/slide-system"], repos)
+
+    def test_get_issue_project_fields_extracts_state_and_plan(self) -> None:
+        client = GitHubIssueClient(
+            "token",
+            project_id="project-1",
+            project_state_field_id="field-state",
+            project_plan_field_id="field-plan",
+        )
+        repo = Mock()
+        issue = Mock(node_id="issue-node")
+        repo.get_issue.return_value = issue
+
+        with (
+            patch.object(client, "_get_repo", return_value=repo),
+            patch.object(
+                client,
+                "_graphql",
+                return_value={
+                    "node": {
+                        "projectItems": {
+                            "nodes": [
+                                {
+                                    "project": {"id": "project-1"},
+                                    "fieldValues": {
+                                        "nodes": [
+                                            {"name": "Ready", "field": {"id": "field-state", "name": "State"}},
+                                            {"name": "Approved", "field": {"id": "field-plan", "name": "Plan"}},
+                                        ]
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                },
+            ),
+        ):
+            fields = client.get_issue_project_fields("owner/repo", 42)
+
+        self.assertEqual({"state": "Ready", "plan": "Approved"}, fields)
+
+    def test_get_issue_project_fields_queries_with_expanded_field_limits(self) -> None:
+        client = GitHubIssueClient(
+            "token",
+            project_id="project-1",
+            project_state_field_id="field-state",
+            project_plan_field_id="field-plan",
+        )
+        repo = Mock()
+        issue = Mock(node_id="issue-node")
+        repo.get_issue.return_value = issue
+
+        with (
+            patch.object(client, "_get_repo", return_value=repo),
+            patch.object(
+                client,
+                "_graphql",
+                return_value={"node": {"projectItems": {"nodes": []}}},
+            ) as graphql_mock,
+        ):
+            client.get_issue_project_fields("owner/repo", 42)
+
+        query_text = graphql_mock.call_args.args[0]
+        self.assertIn("projectItems(first:50)", query_text)
+        self.assertIn("fieldValues(first:100)", query_text)
+
+    def test_preflight_loads_project_configuration_when_project_is_configured(self) -> None:
+        client = GitHubIssueClient(
+            "token",
+            project_id="project-1",
+            project_state_field_id="field-state",
+            project_state_option_ids='{"Ready":"opt-ready"}',
+            project_plan_field_id="field-plan",
+            project_plan_option_ids='{"Approved":"opt-approved"}',
+        )
+        with (
+            patch.object(client, "_list_accessible_repositories", return_value=["owner/repo"]),
+            patch.object(
+                client,
+                "_graphql",
+                return_value={
+                    "node": {
+                        "__typename": "ProjectV2",
+                        "id": "project-1",
+                        "title": "Dev Bot",
+                        "fields": {
+                            "nodes": [
+                                {
+                                    "id": "field-state",
+                                    "name": "State",
+                                    "options": [{"id": "opt-ready", "name": "Ready"}],
+                                },
+                                {
+                                    "id": "field-plan",
+                                    "name": "Plan",
+                                    "options": [{"id": "opt-approved", "name": "Approved"}],
+                                },
+                            ]
+                        },
+                    }
+                },
+            ),
+        ):
+            payload = client.preflight()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(1, payload["repo_count"])
+        self.assertEqual("Dev Bot", payload["project"]["title"])
+        self.assertEqual("field-state", payload["project"]["state_field"]["id"])
+        self.assertEqual("field-plan", payload["project"]["plan_field"]["id"])
+
+    def test_preflight_fails_when_project_state_option_id_does_not_match(self) -> None:
+        client = GitHubIssueClient(
+            "token",
+            project_id="project-1",
+            project_state_field_id="field-state",
+            project_state_option_ids='{"Ready":"opt-expected"}',
+            project_plan_field_id="field-plan",
+            project_plan_option_ids='{"Approved":"opt-approved"}',
+        )
+        with (
+            patch.object(client, "_list_accessible_repositories", return_value=["owner/repo"]),
+            patch.object(
+                client,
+                "_graphql",
+                return_value={
+                    "node": {
+                        "__typename": "ProjectV2",
+                        "id": "project-1",
+                        "title": "Dev Bot",
+                        "fields": {
+                            "nodes": [
+                                {
+                                    "id": "field-state",
+                                    "name": "State",
+                                    "options": [{"id": "opt-actual", "name": "Ready"}],
+                                },
+                                {
+                                    "id": "field-plan",
+                                    "name": "Plan",
+                                    "options": [{"id": "opt-approved", "name": "Approved"}],
+                                },
+                            ]
+                        },
+                    }
+                },
+            ),
+        ):
+            payload = client.preflight()
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("expected id 'opt-expected' but found 'opt-actual'", payload["error"])
+
+    def test_list_project_issues_normalizes_issue_rows(self) -> None:
+        client = GitHubIssueClient(
+            "token",
+            project_id="project-1",
+            project_state_field_id="field-state",
+            project_plan_field_id="field-plan",
+        )
+        with patch.object(
+            client,
+            "_graphql",
+            return_value={
+                "node": {
+                    "items": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [
+                            {
+                                "content": {
+                                    "number": 42,
+                                    "title": "Ship scheduler",
+                                    "body": "body",
+                                    "url": "https://github.com/owner/repo/issues/42",
+                                    "state": "OPEN",
+                                    "repository": {"nameWithOwner": "owner/repo"},
+                                },
+                                "fieldValues": {
+                                    "nodes": [
+                                        {"name": "Ready", "field": {"id": "field-state", "name": "State"}},
+                                        {"name": "Approved", "field": {"id": "field-plan", "name": "Plan"}},
+                                    ]
+                                },
+                            }
+                        ],
+                    }
+                }
+            },
+        ):
+            items = client.list_project_issues()
+
+        self.assertEqual(
+            [
+                {
+                    "repo_full_name": "owner/repo",
+                    "number": 42,
+                    "title": "Ship scheduler",
+                    "body": "body",
+                    "url": "https://github.com/owner/repo/issues/42",
+                    "issue_state": "OPEN",
+                    "state": "Ready",
+                    "plan": "Approved",
+                }
+            ],
+            items,
+        )
+
+    def test_list_project_issues_queries_with_expanded_field_limits(self) -> None:
+        client = GitHubIssueClient(
+            "token",
+            project_id="project-1",
+            project_state_field_id="field-state",
+            project_plan_field_id="field-plan",
+        )
+        with patch.object(
+            client,
+            "_graphql",
+            return_value={"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}},
+        ) as graphql_mock:
+            client.list_project_issues()
+
+        query_text = graphql_mock.call_args.args[0]
+        self.assertIn("fieldValues(first:100)", query_text)
+
+    def test_add_issue_to_project_creates_project_item_when_missing(self) -> None:
+        client = GitHubIssueClient("token", project_id="project-1")
+        repo = Mock()
+        issue = Mock(node_id="issue-node")
+        repo.get_issue.return_value = issue
+
+        with (
+            patch.object(client, "_get_repo", return_value=repo),
+            patch.object(client, "_find_project_item_id", return_value=""),
+            patch.object(
+                client,
+                "_graphql",
+                return_value={"addProjectV2ItemById": {"item": {"id": "item-1"}}},
+            ) as graphql_mock,
+        ):
+            result = client.add_issue_to_project("owner/repo", 42)
+
+        self.assertEqual({"project_updated": True, "item_id": "item-1", "already_present": False}, result)
+        query_text = graphql_mock.call_args.args[0]
+        self.assertIn("addProjectV2ItemById", query_text)
+
+    def test_merge_pull_request_returns_merge_result(self) -> None:
+        client = GitHubIssueClient("token")
+        repo = Mock()
+        pull = Mock()
+        pull.merge.return_value = Mock(merged=True, message="merged", sha="abc123")
+        repo.get_pull.return_value = pull
+
+        with patch.object(client, "_get_repo", return_value=repo):
+            result = client.merge_pull_request("owner/repo", 99)
+
+        self.assertEqual({"merged": True, "message": "merged", "sha": "abc123"}, result)
+
+    def test_get_pull_request_status_returns_mergeability_fields(self) -> None:
+        client = GitHubIssueClient("token")
+        repo = Mock()
+        pull = Mock(draft=False, mergeable=True, mergeable_state="clean")
+        pull.head.sha = "headsha123"
+        repo.get_pull.return_value = pull
+
+        with patch.object(client, "_get_repo", return_value=repo):
+            result = client.get_pull_request_status("owner/repo", 99)
+
+        self.assertEqual(
+            {"draft": False, "mergeable": True, "mergeable_state": "clean", "head_sha": "headsha123"},
+            result,
+        )
 
     def test_parse_next_link_returns_next_url(self) -> None:
         link = (

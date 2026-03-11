@@ -94,6 +94,8 @@ cp .env.example .env
 python -m app.main
 ```
 
+`GITHUB_PROJECT_ID` を設定して Projects v2 を scheduler contract として使う場合は、`GITHUB_PROJECT_STATE_FIELD_ID` / `GITHUB_PROJECT_STATE_OPTION_IDS` / `GITHUB_PROJECT_PLAN_FIELD_ID` / `GITHUB_PROJECT_PLAN_OPTION_IDS` も必須です。不足している場合は起動時 validation で停止します。
+
 ## Discord コマンド
 
 | コマンド | 説明 |
@@ -101,21 +103,19 @@ python -m app.main
 | `/plan <repo>` | 要件整理を開始し、計画を生成 |
 | `/approve-plan` | 計画を承認して実装可能状態にする |
 | `/reject-plan` | 計画を却下して修正を要求 |
-| `/run` | 承認済み計画の実装を開始 |
-| `/retry` | 失敗した実装を再試行 |
 | `/abort` | 実行中のタスクを中止 |
 
 ## Issue のライフサイクル
 
 ```
-Backlog → Planning → Ready → In Progress → Human Review → Done
-                                  ↓              ↓
-                               Blocked        Rework → In Progress
-                                                        ↓
-                                                    Cancelled
+Backlog → Ready → In Progress → Human Review → Merging → Done
+                     ↓              ↓
+                  Blocked        Rework ───────────────┘
+                     ↓
+                 Cancelled
 ```
 
-実装が開始されるには、Projects v2 で `State` が `Ready` / `In Progress` / `Rework` のいずれかで、かつ `Plan` が `Approved` である必要がある。
+新しい実行を開始するには、Projects v2 で `State` が `Ready` または `Rework`、かつ `Plan` が `Approved` である必要がある。`In Progress` は新規 dispatch ではなく restore / reconcile 対象。
 
 ## Workspace 戦略
 

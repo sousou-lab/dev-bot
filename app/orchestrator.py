@@ -9,9 +9,10 @@ from app.state_store import FileStateStore
 
 @dataclass(frozen=True)
 class WorkItem:
-    thread_id: int
+    thread_id: int | None
     repo_full_name: str
     issue: dict
+    issue_key: str = ""
     workspace_key: str = ""
 
 
@@ -26,10 +27,11 @@ class Orchestrator:
         self.executor = executor
         self.max_concurrency = max_concurrency
         self._queue: asyncio.Queue[WorkItem] = asyncio.Queue()
-        self._running: dict[int, asyncio.Task[None]] = {}
+        self._running: dict[str, asyncio.Task[None]] = {}
         self._running_keys: set[str] = set()
         self._queued_thread_ids: set[int] = set()
         self._queued_keys: set[str] = set()
+        self._thread_to_key: dict[int, str] = {}
         self._dispatcher_task: asyncio.Task[None] | None = None
 
     def ensure_started(self) -> None:
@@ -40,22 +42,27 @@ class Orchestrator:
     async def enqueue(self, item: WorkItem) -> bool:
         item_key = self._item_key(item)
         if (
-            item.thread_id in self._running
-            or item.thread_id in self._queued_thread_ids
+            (item.thread_id is not None and item.thread_id in self._queued_thread_ids)
             or item_key in self._running_keys
             or item_key in self._queued_keys
         ):
             return False
-        self.state_store.update_status(item.thread_id, "queued")
+        if item.thread_id is not None and self._is_key_running(item_key):
+            return False
+        if item.thread_id is not None:
+            self.state_store.update_meta(item.issue_key or item.thread_id, runtime_status="queued")
+            self._queued_thread_ids.add(item.thread_id)
+            self._thread_to_key[item.thread_id] = item_key
+        else:
+            self.state_store.update_meta(item.issue_key or item.workspace_key, runtime_status="queued")
         await self._queue.put(item)
-        self._queued_thread_ids.add(item.thread_id)
         self._queued_keys.add(item_key)
         self.ensure_started()
         return True
 
     def is_running(self, thread_id: int) -> bool:
-        task = self._running.get(thread_id)
-        return bool(task and not task.done())
+        item_key = self._thread_to_key.get(thread_id)
+        return bool(item_key and self._is_key_running(item_key))
 
     def is_queued(self, thread_id: int) -> bool:
         return thread_id in self._queued_thread_ids
@@ -69,7 +76,6 @@ class Orchestrator:
 
     async def drain(self) -> None:
         """Gracefully stop: cancel dispatcher, drain queue, cancel running tasks."""
-        # Stop the dispatcher loop
         if self._dispatcher_task and not self._dispatcher_task.done():
             self._dispatcher_task.cancel()
             try:
@@ -77,7 +83,6 @@ class Orchestrator:
             except asyncio.CancelledError:
                 pass
 
-        # Drain the queue
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -86,7 +91,6 @@ class Orchestrator:
         self._queued_thread_ids.clear()
         self._queued_keys.clear()
 
-        # Cancel running tasks
         tasks = list(self._running.values())
         for task in tasks:
             task.cancel()
@@ -102,35 +106,53 @@ class Orchestrator:
                 self._cleanup_finished()
                 continue
             item = await self._queue.get()
-            self._queued_thread_ids.discard(item.thread_id)
-            self._queued_keys.discard(self._item_key(item))
+            item_key = self._item_key(item)
+            if item.thread_id is not None:
+                self._queued_thread_ids.discard(item.thread_id)
+                self._thread_to_key[item.thread_id] = item_key
+            self._queued_keys.discard(item_key)
             self._cleanup_finished()
+            self.state_store.update_meta(
+                item.issue_key or item.workspace_key or item.thread_id or item_key, runtime_status="running"
+            )
             task = asyncio.create_task(self._run_item(item))
-            self._running[item.thread_id] = task
-            self._running_keys.add(self._item_key(item))
+            self._running[item_key] = task
+            self._running_keys.add(item_key)
 
     async def _run_item(self, item: WorkItem) -> None:
+        item_key = self._item_key(item)
+        status_target = (
+            item.issue_key or item.workspace_key or (item.thread_id if item.thread_id is not None else item_key)
+        )
         try:
             await self.executor(item)
         except Exception as exc:
             self.state_store.record_failure(
-                item.thread_id,
+                status_target,
                 stage="run_execution",
                 message=str(exc),
-                details={"repo": item.repo_full_name},
+                details={"repo": item.repo_full_name, "issue_key": item_key},
             )
-            self.state_store.update_status(item.thread_id, "failed")
+            self.state_store.update_meta(status_target, runtime_status="failed")
+            self.state_store.update_status(status_target, "Rework" if item.issue_key else "failed")
         finally:
-            self._running.pop(item.thread_id, None)
-            self._running_keys.discard(self._item_key(item))
+            self.state_store.update_meta(status_target, runtime_status="")
+            self._running.pop(item_key, None)
+            self._running_keys.discard(item_key)
 
     def _cleanup_finished(self) -> None:
-        stale = [thread_id for thread_id, task in self._running.items() if task.done()]
-        for thread_id in stale:
-            self._running.pop(thread_id, None)
+        stale = [item_key for item_key, task in self._running.items() if task.done()]
+        for item_key in stale:
+            self._running.pop(item_key, None)
 
     def _item_key(self, item: WorkItem) -> str:
-        return item.workspace_key or f"{item.repo_full_name}#{item.issue.get('number', item.thread_id)}"
+        return (
+            item.issue_key or item.workspace_key or f"{item.repo_full_name}#{item.issue.get('number', item.thread_id)}"
+        )
+
+    def _is_key_running(self, item_key: str) -> bool:
+        task = self._running.get(item_key)
+        return bool(task and not task.done())
 
     async def restore(self, items: list[WorkItem]) -> None:
         for item in items:

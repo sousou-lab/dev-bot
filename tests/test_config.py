@@ -83,3 +83,41 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
 
         self.assertEqual(5242880, settings.claude_agent_max_buffer_size)
+
+    def test_from_env_uses_scheduler_poll_interval_seconds(self) -> None:
+        with tempfile.NamedTemporaryFile() as key_file:
+            env = {
+                "DISCORD_BOT_TOKEN": "discord",
+                "DISCORD_GUILD_ID": "guild",
+                "DISCORD_STATUS_CHANNEL_ID": "status",
+                "WORKSPACE_ROOT": "/tmp/workspaces",
+                "STATE_DIR": "/tmp/state",
+                "GITHUB_APP_ID": "1",
+                "GITHUB_APP_PRIVATE_KEY_PATH": key_file.name,
+                "GITHUB_APP_INSTALLATION_ID": "99",
+                "SCHEDULER_POLL_INTERVAL_SECONDS": "7",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                settings = Settings.from_env()
+
+        self.assertEqual(7, settings.scheduler_poll_interval_seconds)
+
+    def test_validate_settings_requires_project_plan_and_state_fields_when_project_id_is_set(self) -> None:
+        settings = Settings(
+            discord_bot_token="discord",
+            discord_guild_id="guild",
+            discord_status_channel_id="status",
+            workspace_root="/tmp/workspaces",
+            state_dir="/tmp/state",
+            github_app_id="1",
+            github_app_private_key_path=__file__,
+            github_app_installation_id="99",
+            github_project_id="project-123",
+        )
+
+        missing = validate_settings(settings)
+
+        self.assertIn("GITHUB_PROJECT_STATE_FIELD_ID", missing)
+        self.assertIn("GITHUB_PROJECT_STATE_OPTION_IDS", missing)
+        self.assertIn("GITHUB_PROJECT_PLAN_FIELD_ID", missing)
+        self.assertIn("GITHUB_PROJECT_PLAN_OPTION_IDS", missing)

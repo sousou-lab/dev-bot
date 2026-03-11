@@ -64,6 +64,8 @@ if PYDANTIC_AVAILABLE:
         github_project_id: str = ""
         github_project_state_field_id: str = ""
         github_project_state_option_ids: str = ""
+        github_project_plan_field_id: str = ""
+        github_project_plan_option_ids: str = ""
         github_token: str = ""
         anthropic_api_key: str = ""
         planning_lane_enabled: bool = True
@@ -74,6 +76,7 @@ if PYDANTIC_AVAILABLE:
         codex_model: str = "gpt-5-codex"
         claude_agent_max_buffer_size: int = 5 * 1024 * 1024
         approval_timeout_seconds: int = 900
+        scheduler_poll_interval_seconds: int = 15
 
         @field_validator(
             "discord_bot_token",
@@ -99,6 +102,8 @@ if PYDANTIC_AVAILABLE:
             "github_project_id",
             "github_project_state_field_id",
             "github_project_state_option_ids",
+            "github_project_plan_field_id",
+            "github_project_plan_option_ids",
             "log_level",
             "codex_app_server_command",
             "codex_model",
@@ -132,6 +137,8 @@ if PYDANTIC_AVAILABLE:
                 github_project_id=os.getenv("GITHUB_PROJECT_ID", ""),
                 github_project_state_field_id=os.getenv("GITHUB_PROJECT_STATE_FIELD_ID", ""),
                 github_project_state_option_ids=os.getenv("GITHUB_PROJECT_STATE_OPTION_IDS", ""),
+                github_project_plan_field_id=os.getenv("GITHUB_PROJECT_PLAN_FIELD_ID", ""),
+                github_project_plan_option_ids=os.getenv("GITHUB_PROJECT_PLAN_OPTION_IDS", ""),
                 github_token=os.getenv("GITHUB_TOKEN", ""),
                 anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
                 planning_lane_enabled=_env_flag("PLANNING_LANE_ENABLED", True),
@@ -142,6 +149,7 @@ if PYDANTIC_AVAILABLE:
                 codex_model=os.getenv("CODEX_MODEL", "gpt-5-codex"),
                 claude_agent_max_buffer_size=_parse_int("CLAUDE_AGENT_MAX_BUFFER_SIZE", 5 * 1024 * 1024),
                 approval_timeout_seconds=_parse_int("APPROVAL_TIMEOUT_SECONDS", 900),
+                scheduler_poll_interval_seconds=_parse_int("SCHEDULER_POLL_INTERVAL_SECONDS", 15),
             )
 
         @property
@@ -184,6 +192,8 @@ else:
             self.github_project_id = str(kwargs.get("github_project_id", "")).strip()
             self.github_project_state_field_id = str(kwargs.get("github_project_state_field_id", "")).strip()
             self.github_project_state_option_ids = str(kwargs.get("github_project_state_option_ids", "")).strip()
+            self.github_project_plan_field_id = str(kwargs.get("github_project_plan_field_id", "")).strip()
+            self.github_project_plan_option_ids = str(kwargs.get("github_project_plan_option_ids", "")).strip()
             self.github_token = str(kwargs.get("github_token", "")).strip()
             self.anthropic_api_key = str(kwargs.get("anthropic_api_key", "")).strip()
             self.planning_lane_enabled = bool(kwargs.get("planning_lane_enabled", True))
@@ -194,6 +204,7 @@ else:
             self.codex_model = str(kwargs.get("codex_model", "gpt-5-codex")).strip()
             self.claude_agent_max_buffer_size = int(kwargs.get("claude_agent_max_buffer_size", 5 * 1024 * 1024))
             self.approval_timeout_seconds = int(kwargs.get("approval_timeout_seconds", 900))
+            self.scheduler_poll_interval_seconds = int(kwargs.get("scheduler_poll_interval_seconds", 15))
 
         @classmethod
         def from_env(cls) -> Settings:
@@ -214,6 +225,8 @@ else:
                 github_project_id=os.getenv("GITHUB_PROJECT_ID", ""),
                 github_project_state_field_id=os.getenv("GITHUB_PROJECT_STATE_FIELD_ID", ""),
                 github_project_state_option_ids=os.getenv("GITHUB_PROJECT_STATE_OPTION_IDS", ""),
+                github_project_plan_field_id=os.getenv("GITHUB_PROJECT_PLAN_FIELD_ID", ""),
+                github_project_plan_option_ids=os.getenv("GITHUB_PROJECT_PLAN_OPTION_IDS", ""),
                 github_token=os.getenv("GITHUB_TOKEN", ""),
                 anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
                 planning_lane_enabled=_env_flag("PLANNING_LANE_ENABLED", True),
@@ -224,6 +237,7 @@ else:
                 codex_model=os.getenv("CODEX_MODEL", "gpt-5-codex"),
                 claude_agent_max_buffer_size=_parse_int("CLAUDE_AGENT_MAX_BUFFER_SIZE", 5 * 1024 * 1024),
                 approval_timeout_seconds=_parse_int("APPROVAL_TIMEOUT_SECONDS", 900),
+                scheduler_poll_interval_seconds=_parse_int("SCHEDULER_POLL_INTERVAL_SECONDS", 15),
             )
 
         @property
@@ -255,6 +269,17 @@ def validate_settings(settings: Settings) -> list[str]:
     for key, value in required.items():
         if not str(value).strip():
             missing.append(key)
+    project_id = str(getattr(settings, "github_project_id", "")).strip()
+    if project_id:
+        project_required = {
+            "GITHUB_PROJECT_STATE_FIELD_ID": getattr(settings, "github_project_state_field_id", ""),
+            "GITHUB_PROJECT_STATE_OPTION_IDS": getattr(settings, "github_project_state_option_ids", ""),
+            "GITHUB_PROJECT_PLAN_FIELD_ID": getattr(settings, "github_project_plan_field_id", ""),
+            "GITHUB_PROJECT_PLAN_OPTION_IDS": getattr(settings, "github_project_plan_option_ids", ""),
+        }
+        for key, value in project_required.items():
+            if not str(value).strip():
+                missing.append(key)
     return missing
 
 

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+from app import run_request
 from app.run_request import ensure_issue_and_enqueue
 from app.state_store import FileStateStore
 from tests.helpers import setup_planning_artifacts
@@ -25,8 +26,15 @@ class RunRequestTests(unittest.IsolatedAsyncioTestCase):
         self.state_store = FileStateStore(self.tempdir.name)
         self.state_store.create_run(thread_id=100, parent_message_id=200, channel_id=300)
         setup_planning_artifacts(100, self.state_store)
+        self._orig_run_blocking = run_request.run_blocking
+
+        async def _run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        run_request.run_blocking = _run_blocking
 
     async def asyncTearDown(self) -> None:
+        run_request.run_blocking = self._orig_run_blocking
         self.tempdir.cleanup()
 
     async def test_creates_issue_and_enqueues_bound_workspace_key(self) -> None:
@@ -53,6 +61,7 @@ class RunRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(12, issue["number"])
         self.assertEqual("owner/repo#12", self.state_store.load_meta(100)["issue_key"])
         self.assertEqual("owner/repo#12", orchestrator.items[0].workspace_key)
+        self.assertEqual("owner/repo#12", orchestrator.items[0].issue_key)
 
     async def test_reuses_bound_issue_without_creating_a_new_one(self) -> None:
         self.state_store.write_artifact(
@@ -79,7 +88,36 @@ class RunRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(12, issue["number"])
         self.assertEqual("owner/repo#12", orchestrator.items[0].workspace_key)
+        self.assertEqual("owner/repo#12", orchestrator.items[0].issue_key)
         self.assertEqual("owner/repo#12", self.state_store.load_meta(100)["issue_key"])
+
+    async def test_reuses_existing_issue_record_for_bound_thread(self) -> None:
+        self.state_store.bind_issue(100, "owner/repo", 12)
+        self.state_store.write_artifact(
+            "owner/repo#12",
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 12,
+                "title": "Existing issue",
+                "body": "Existing body",
+                "url": "https://example.test/issues/12",
+            },
+        )
+        github_client = SimpleNamespace(create_issue=self.fail)
+        orchestrator = RecordingOrchestrator()
+
+        issue = await ensure_issue_and_enqueue(
+            thread_id=100,
+            repo_full_name="owner/repo",
+            state_store=self.state_store,
+            github_client=github_client,
+            orchestrator=orchestrator,
+        )
+
+        self.assertEqual(12, issue["number"])
+        self.assertEqual("owner/repo#12", orchestrator.items[0].workspace_key)
+        self.assertEqual("owner/repo#12", orchestrator.items[0].issue_key)
 
     async def test_raises_when_enqueue_is_rejected(self) -> None:
         self.state_store.write_artifact(

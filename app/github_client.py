@@ -49,6 +49,8 @@ class GitHubIssueClient:
         project_id: str | None = None,
         project_state_field_id: str | None = None,
         project_state_option_ids: str | None = None,
+        project_plan_field_id: str | None = None,
+        project_plan_option_ids: str | None = None,
     ) -> None:
         self._repo_cache: list[str] = []
         self._repo_cache_expires_at = 0.0
@@ -59,6 +61,8 @@ class GitHubIssueClient:
         self._project_id = (project_id or "").strip()
         self._project_state_field_id = (project_state_field_id or "").strip()
         self._project_state_option_ids = _parse_option_ids(project_state_option_ids or "")
+        self._project_plan_field_id = (project_plan_field_id or "").strip()
+        self._project_plan_option_ids = _parse_option_ids(project_plan_option_ids or "")
         self.client = None
 
     def create_issue(self, repo_full_name: str, title: str, body: str) -> CreatedIssue:
@@ -90,6 +94,41 @@ class GitHubIssueClient:
             "repo_full_name": repo_full_name,
         }
 
+    def merge_pull_request(self, repo_full_name: str, pull_number: int) -> dict[str, Any]:
+        repo = self._get_repo(repo_full_name)
+        try:
+            pull = repo.get_pull(number=pull_number)
+            merged = pull.merge()
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub PR merge failed: {getattr(exc, 'data', exc)}") from exc
+        return {
+            "merged": bool(getattr(merged, "merged", False)),
+            "message": str(getattr(merged, "message", "")),
+            "sha": str(getattr(merged, "sha", "")),
+        }
+
+    def ready_pull_request_for_review(self, repo_full_name: str, pull_number: int) -> dict[str, Any]:
+        repo = self._get_repo(repo_full_name)
+        try:
+            pull = repo.get_pull(number=pull_number)
+            pull.mark_ready_for_review()
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub PR ready-for-review failed: {getattr(exc, 'data', exc)}") from exc
+        return {"ready_for_review": True}
+
+    def get_pull_request_status(self, repo_full_name: str, pull_number: int) -> dict[str, Any]:
+        repo = self._get_repo(repo_full_name)
+        try:
+            pull = repo.get_pull(number=pull_number)
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub PR lookup failed: {getattr(exc, 'data', exc)}") from exc
+        return {
+            "draft": bool(getattr(pull, "draft", False)),
+            "mergeable": getattr(pull, "mergeable", None),
+            "mergeable_state": str(getattr(pull, "mergeable_state", "") or ""),
+            "head_sha": str(getattr(getattr(pull, "head", None), "sha", "") or ""),
+        }
+
     def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict:
         repo = self._get_repo(repo_full_name)
         try:
@@ -116,6 +155,75 @@ class GitHubIssueClient:
             "labels": [label.name for label in getattr(issue, "labels", [])],
         }
 
+    def get_issue_project_fields(self, repo_full_name: str, issue_number: int) -> dict[str, str]:
+        repo = self._get_repo(repo_full_name)
+        try:
+            issue = repo.get_issue(number=issue_number)
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub issue lookup failed: {getattr(exc, 'data', exc)}") from exc
+        return self._load_issue_project_fields(getattr(issue, "node_id", ""))
+
+    def list_project_issues(self) -> list[dict[str, Any]]:
+        if not self._project_id:
+            return []
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            query = """
+            query($projectId:ID!, $cursor:String) {
+              node(id:$projectId) {
+                ... on ProjectV2 {
+                  items(first:100, after:$cursor) {
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                    nodes {
+                      content {
+                        ... on Issue {
+                          number
+                          title
+                          body
+                          url
+                          state
+                          repository { nameWithOwner }
+                        }
+                      }
+                      fieldValues(first:100) {
+                        nodes {
+                          ... on ProjectV2ItemFieldSingleSelectValue {
+                            name
+                            field {
+                              ... on ProjectV2FieldCommon {
+                                id
+                                name
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            payload = self._graphql(query, {"projectId": self._project_id, "cursor": cursor})
+            items_payload = payload.get("node", {}).get("items", {})
+            nodes = items_payload.get("nodes", [])
+            if isinstance(nodes, list):
+                for item in nodes:
+                    normalized = self._normalize_project_issue_item(item)
+                    if normalized:
+                        items.append(normalized)
+            page_info = items_payload.get("pageInfo", {}) if isinstance(items_payload, dict) else {}
+            if not isinstance(page_info, dict) or not page_info.get("hasNextPage"):
+                break
+            cursor = str(page_info.get("endCursor", "")).strip() or None
+            if not cursor:
+                break
+        return items
+
     def update_issue_state(self, repo_full_name: str, issue_number: int, state: str) -> dict[str, Any]:
         repo = self._get_repo(repo_full_name)
         try:
@@ -129,6 +237,52 @@ class GitHubIssueClient:
         except GithubException as exc:
             raise RuntimeError(f"GitHub issue state update failed: {getattr(exc, 'data', exc)}") from exc
         return {"state": state, "labels": keep if not project_updated else [], "project_updated": project_updated}
+
+    def update_issue_plan(self, repo_full_name: str, issue_number: int, plan_state: str) -> dict[str, Any]:
+        repo = self._get_repo(repo_full_name)
+        try:
+            issue = repo.get_issue(number=issue_number)
+            project_updated = self._update_project_single_select(
+                issue_node_id=getattr(issue, "node_id", ""),
+                field_id=self._project_plan_field_id,
+                option_ids=self._project_plan_option_ids,
+                value=plan_state,
+            )
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub issue plan update failed: {getattr(exc, 'data', exc)}") from exc
+        return {"plan": plan_state, "project_updated": project_updated}
+
+    def add_issue_to_project(self, repo_full_name: str, issue_number: int) -> dict[str, Any]:
+        if not self._project_id:
+            return {"project_updated": False}
+        repo = self._get_repo(repo_full_name)
+        try:
+            issue = repo.get_issue(number=issue_number)
+            item_id = self._find_project_item_id(getattr(issue, "node_id", ""))
+            if item_id:
+                return {"project_updated": True, "item_id": item_id, "already_present": True}
+            mutation = """
+            mutation($projectId:ID!, $contentId:ID!) {
+              addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) {
+                item { id }
+              }
+            }
+            """
+            payload = self._graphql(
+                mutation,
+                {
+                    "projectId": self._project_id,
+                    "contentId": getattr(issue, "node_id", ""),
+                },
+            )
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub project add failed: {getattr(exc, 'data', exc)}") from exc
+        item = payload.get("addProjectV2ItemById", {}).get("item", {}) if isinstance(payload, dict) else {}
+        return {
+            "project_updated": bool(item),
+            "item_id": str(item.get("id", "") or ""),
+            "already_present": False,
+        }
 
     def upsert_workpad_comment(
         self,
@@ -178,9 +332,12 @@ class GitHubIssueClient:
         payload: dict[str, Any] = {"auth_mode": "token" if self._token else "app", "ok": False}
         try:
             repos = self._list_accessible_repositories()
-            payload["ok"] = True
             payload["repo_count"] = len(repos)
             payload["sample_repos"] = repos[:5]
+            if self._project_id:
+                project = self._load_project_configuration()
+                payload["project"] = project
+            payload["ok"] = True
             return payload
         except Exception as exc:
             fallback = self.fallback_repositories()
@@ -294,9 +451,247 @@ class GitHubIssueClient:
             raise RuntimeError(f"GitHub repository access failed: {getattr(exc, 'data', exc)}") from exc
 
     def _update_project_state(self, issue_node_id: str, state: str) -> bool:
-        if not self._project_id or not self._project_state_field_id or not self._project_state_option_ids:
+        return self._update_project_single_select(
+            issue_node_id=issue_node_id,
+            field_id=self._project_state_field_id,
+            option_ids=self._project_state_option_ids,
+            value=state,
+        )
+
+    def _load_issue_project_fields(self, issue_node_id: str) -> dict[str, str]:
+        if not self._project_id or not issue_node_id:
+            return {}
+        query = """
+        query($issueId:ID!) {
+          node(id:$issueId) {
+            ... on Issue {
+              projectItems(first:50) {
+                nodes {
+                  project { id }
+                  fieldValues(first:100) {
+                    nodes {
+                      ... on ProjectV2ItemFieldSingleSelectValue {
+                        name
+                        field {
+                          ... on ProjectV2FieldCommon {
+                            id
+                            name
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = self._graphql(query, {"issueId": issue_node_id})
+        nodes = payload.get("node", {}).get("projectItems", {}).get("nodes", [])
+        if not isinstance(nodes, list):
+            return {}
+        result: dict[str, str] = {}
+        for item in nodes:
+            if not isinstance(item, dict):
+                continue
+            project = item.get("project", {})
+            if not isinstance(project, dict) or project.get("id") != self._project_id:
+                continue
+            field_values = item.get("fieldValues", {}).get("nodes", [])
+            if not isinstance(field_values, list):
+                continue
+            for field_value in field_values:
+                if not isinstance(field_value, dict):
+                    continue
+                field = field_value.get("field", {})
+                if not isinstance(field, dict):
+                    continue
+                field_id = str(field.get("id", ""))
+                field_name = str(field.get("name", "")).strip()
+                value_name = str(field_value.get("name", "")).strip()
+                if not value_name:
+                    continue
+                if field_id == self._project_state_field_id or field_name == "State":
+                    result["state"] = value_name
+                if field_id == self._project_plan_field_id or field_name == "Plan":
+                    result["plan"] = value_name
+            break
+        return result
+
+    def _load_project_configuration(self) -> dict[str, Any]:
+        if not self._project_id:
+            return {}
+        query = """
+        query($projectId:ID!) {
+          node(id:$projectId) {
+            __typename
+            ... on ProjectV2 {
+              id
+              title
+              fields(first:50) {
+                nodes {
+                  ... on ProjectV2SingleSelectField {
+                    id
+                    name
+                    options {
+                      id
+                      name
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        payload = self._graphql(query, {"projectId": self._project_id})
+        node = payload.get("node", {})
+        if not isinstance(node, dict) or node.get("__typename") != "ProjectV2":
+            raise RuntimeError(f"GitHub Project v2 lookup failed: project_id={self._project_id!r} is not accessible")
+
+        fields_payload = node.get("fields", {})
+        field_nodes = fields_payload.get("nodes", []) if isinstance(fields_payload, dict) else []
+        project_fields = self._extract_project_field_configuration(field_nodes)
+
+        state_field = project_fields.get(self._project_state_field_id)
+        plan_field = project_fields.get(self._project_plan_field_id)
+        if state_field is None:
+            raise RuntimeError(
+                "GitHub Project v2 configuration failed: "
+                f"state field {self._project_state_field_id!r} was not found on project {self._project_id!r}"
+            )
+        if plan_field is None:
+            raise RuntimeError(
+                "GitHub Project v2 configuration failed: "
+                f"plan field {self._project_plan_field_id!r} was not found on project {self._project_id!r}"
+            )
+
+        self._validate_project_option_ids(
+            field_name="State", expected=self._project_state_option_ids, field=state_field
+        )
+        self._validate_project_option_ids(field_name="Plan", expected=self._project_plan_option_ids, field=plan_field)
+
+        return {
+            "id": str(node.get("id", "") or ""),
+            "title": str(node.get("title", "") or ""),
+            "state_field": {
+                "id": state_field["id"],
+                "name": state_field["name"],
+                "option_count": len(state_field["options"]),
+            },
+            "plan_field": {
+                "id": plan_field["id"],
+                "name": plan_field["name"],
+                "option_count": len(plan_field["options"]),
+            },
+        }
+
+    def _normalize_project_issue_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        content = item.get("content", {})
+        if not isinstance(content, dict):
+            return {}
+        repo = content.get("repository", {})
+        repo_full_name = str(repo.get("nameWithOwner", "")).strip() if isinstance(repo, dict) else ""
+        issue_number = int(content.get("number", 0) or 0)
+        if not repo_full_name or issue_number <= 0:
+            return {}
+        fields = self._extract_project_field_values(item.get("fieldValues", {}).get("nodes", []))
+        return {
+            "repo_full_name": repo_full_name,
+            "number": issue_number,
+            "title": str(content.get("title", "") or ""),
+            "body": str(content.get("body", "") or ""),
+            "url": str(content.get("url", "") or ""),
+            "issue_state": str(content.get("state", "") or ""),
+            "state": fields.get("state", ""),
+            "plan": fields.get("plan", ""),
+        }
+
+    def _extract_project_field_values(self, nodes: Any) -> dict[str, str]:
+        if not isinstance(nodes, list):
+            return {}
+        result: dict[str, str] = {}
+        for field_value in nodes:
+            if not isinstance(field_value, dict):
+                continue
+            field = field_value.get("field", {})
+            if not isinstance(field, dict):
+                continue
+            field_id = str(field.get("id", ""))
+            field_name = str(field.get("name", "")).strip()
+            value_name = str(field_value.get("name", "")).strip()
+            if not value_name:
+                continue
+            if field_id == self._project_state_field_id or field_name == "State":
+                result["state"] = value_name
+            if field_id == self._project_plan_field_id or field_name == "Plan":
+                result["plan"] = value_name
+        return result
+
+    def _extract_project_field_configuration(self, nodes: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(nodes, list):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for field in nodes:
+            if not isinstance(field, dict):
+                continue
+            field_id = str(field.get("id", "")).strip()
+            if not field_id:
+                continue
+            options_payload = field.get("options", [])
+            options: dict[str, str] = {}
+            if isinstance(options_payload, list):
+                for option in options_payload:
+                    if not isinstance(option, dict):
+                        continue
+                    option_id = str(option.get("id", "")).strip()
+                    option_name = str(option.get("name", "")).strip()
+                    if option_id and option_name:
+                        options[option_name] = option_id
+            result[field_id] = {
+                "id": field_id,
+                "name": str(field.get("name", "")).strip(),
+                "options": options,
+            }
+        return result
+
+    def _validate_project_option_ids(
+        self,
+        *,
+        field_name: str,
+        expected: dict[str, str],
+        field: dict[str, Any],
+    ) -> None:
+        actual_options = field.get("options", {})
+        if not isinstance(actual_options, dict):
+            actual_options = {}
+        for option_name, option_id in expected.items():
+            actual_id = str(actual_options.get(option_name, "")).strip()
+            if not actual_id:
+                raise RuntimeError(
+                    "GitHub Project v2 configuration failed: "
+                    f"{field_name} option {option_name!r} is missing from field {field.get('id', '')!r}"
+                )
+            if actual_id != option_id:
+                raise RuntimeError(
+                    "GitHub Project v2 configuration failed: "
+                    f"{field_name} option {option_name!r} expected id {option_id!r} but found {actual_id!r}"
+                )
+
+    def _update_project_single_select(
+        self,
+        *,
+        issue_node_id: str,
+        field_id: str,
+        option_ids: dict[str, str],
+        value: str,
+    ) -> bool:
+        if not self._project_id or not field_id or not option_ids:
             return False
-        option_id = self._project_state_option_ids.get(state)
+        option_id = option_ids.get(value)
         if not option_id or not issue_node_id:
             return False
         item_id = self._find_project_item_id(issue_node_id)
@@ -321,7 +716,7 @@ class GitHubIssueClient:
             {
                 "projectId": self._project_id,
                 "itemId": item_id,
-                "fieldId": self._project_state_field_id,
+                "fieldId": field_id,
                 "optionId": option_id,
             },
         )

@@ -3,11 +3,11 @@
 ## Required Fields
 `State` as single select:
 - Backlog
-- Planning
 - Ready
 - In Progress
 - Human Review
 - Rework
+- Merging
 - Blocked
 - Done
 - Cancelled
@@ -25,7 +25,7 @@ Additional fields:
 
 ## Dispatch Gate
 Dispatch only when:
-- `State` is one of `Ready`, `In Progress`, or `Rework`
+- `State` is one of `Ready` or `Rework`
 - `Plan` is `Approved`
 - no active claim exists for the issue
 
@@ -34,6 +34,8 @@ Current runtime configuration uses the following env vars:
 - `GITHUB_PROJECT_ID`
 - `GITHUB_PROJECT_STATE_FIELD_ID`
 - `GITHUB_PROJECT_STATE_OPTION_IDS`
+- `GITHUB_PROJECT_PLAN_FIELD_ID`
+- `GITHUB_PROJECT_PLAN_OPTION_IDS`
 
 `GITHUB_PROJECT_STATE_OPTION_IDS` must be a JSON object, for example:
 
@@ -47,6 +49,17 @@ Current runtime configuration uses the following env vars:
   "Blocked": "PVTSSF_ccc",
   "Done": "PVTSSF_ddd",
   "Cancelled": "PVTSSF_eee"
+}
+```
+
+`GITHUB_PROJECT_PLAN_OPTION_IDS` must be a JSON object, for example:
+
+```json
+{
+  "Not Started": "PVTSSF_plan_aaa",
+  "Drafted": "PVTSSF_plan_bbb",
+  "Approved": "PVTSSF_plan_ccc",
+  "Changes Requested": "PVTSSF_plan_ddd"
 }
 ```
 

@@ -137,7 +137,7 @@ class RequirementsAgent:
         return self.runs_root or self.settings.runs_root
 
     def _load_messages(self, thread_id: int) -> list[dict]:
-        path = Path(self._runs_root) / str(thread_id) / "conversation.jsonl"
+        path = _conversation_path(Path(self._runs_root), thread_id)
         rows: list[dict] = []
         if not path.exists():
             return rows
@@ -254,6 +254,25 @@ class RequirementsAgent:
                     return f"不足している情報をまとめて確認します。分かる範囲でまとめて回答してください。\n\n{lines}"
 
         return str(payload.get("reply", ""))
+
+
+def _conversation_path(runs_root: Path, thread_id: int) -> Path:
+    binding_path = runs_root / "bindings" / "discord_threads" / f"{thread_id}.json"
+    if binding_path.exists():
+        try:
+            payload = json.loads(binding_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        issue_key = str(payload.get("issue_key", "")).strip()
+        if issue_key:
+            safe_issue_key = issue_key.replace("/", "__").replace("#", "__")
+            issue_path = runs_root / "issues" / safe_issue_key / "conversation.jsonl"
+            if issue_path.exists():
+                return issue_path
+    draft_path = runs_root / "drafts" / str(thread_id) / "conversation.jsonl"
+    if draft_path.exists():
+        return draft_path
+    return runs_root / str(thread_id) / "conversation.jsonl"
 
 
 def _extract_urls(text: str) -> list[str]:

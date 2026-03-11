@@ -35,7 +35,7 @@ class ApprovalCoordinator:
             requested_at=datetime.now(UTC).isoformat(),
         )
         self.state_store.write_artifact(thread_id, "pending_approval.json", asdict(request))
-        self.state_store.update_status(thread_id, "awaiting_high_risk_approval")
+        self.state_store.update_meta(thread_id, runtime_status="awaiting_high_risk_approval")
         loop = asyncio.get_running_loop()
         self._pending[thread_id] = loop.create_future()
         return request

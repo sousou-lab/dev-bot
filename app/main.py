@@ -35,14 +35,32 @@ def main() -> int:
         project_id=getattr(settings, "github_project_id", ""),
         project_state_field_id=getattr(settings, "github_project_state_field_id", ""),
         project_state_option_ids=getattr(settings, "github_project_state_option_ids", ""),
+        project_plan_field_id=getattr(settings, "github_project_plan_field_id", ""),
+        project_plan_option_ids=getattr(settings, "github_project_plan_option_ids", ""),
     ).preflight()
     if github_preflight.get("ok"):
-        logger.info(
-            "GitHub preflight OK: repo_count=%s sample=%s",
-            github_preflight.get("repo_count", 0),
-            github_preflight.get("sample_repos", []),
-        )
+        project = github_preflight.get("project", {})
+        if isinstance(project, dict) and project.get("id"):
+            logger.info(
+                "GitHub preflight OK: repo_count=%s sample=%s project=%s",
+                github_preflight.get("repo_count", 0),
+                github_preflight.get("sample_repos", []),
+                project.get("title") or project.get("id"),
+            )
+        else:
+            logger.info(
+                "GitHub preflight OK: repo_count=%s sample=%s",
+                github_preflight.get("repo_count", 0),
+                github_preflight.get("sample_repos", []),
+            )
     else:
+        if getattr(settings, "github_project_id", "").strip():
+            logger.error(
+                "GitHub preflight failed: error=%s fallback=%s",
+                github_preflight.get("error", "unknown"),
+                github_preflight.get("fallback_repos", []),
+            )
+            return 1
         logger.warning(
             "GitHub preflight warning: error=%s fallback=%s",
             github_preflight.get("error", "unknown"),
