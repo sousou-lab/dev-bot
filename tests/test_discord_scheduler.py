@@ -99,11 +99,18 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_scheduler_tick_merges_pr_when_state_is_merging(self) -> None:
         issue_key = "owner/repo#42"
         self.state_store.create_issue_record(issue_key, thread_id=321, status="Merging")
-        self.state_store.update_issue_meta(issue_key, github_repo="owner/repo", issue_number="42", plan_state="Approved")
+        self.state_store.update_issue_meta(
+            issue_key, github_repo="owner/repo", issue_number="42", plan_state="Approved"
+        )
         self.state_store.write_artifact(
             issue_key,
             "issue.json",
-            {"repo_full_name": "owner/repo", "number": 42, "title": "Ship scheduler", "url": "https://github.com/owner/repo/issues/42"},
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
         )
         self.state_store.write_artifact(
             issue_key,
@@ -125,7 +132,11 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
                 "plan": "Approved",
             }
         ]
-        self.client.github_client.merge_pull_request.return_value = {"merged": True, "message": "merged", "sha": "abc123"}
+        self.client.github_client.merge_pull_request.return_value = {
+            "merged": True,
+            "message": "merged",
+            "sha": "abc123",
+        }
         self.client.github_client.get_pull_request_status.return_value = {
             "draft": False,
             "mergeable": True,
@@ -143,11 +154,18 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_scheduler_tick_blocks_merging_issue_without_pr(self) -> None:
         issue_key = "owner/repo#42"
         self.state_store.create_issue_record(issue_key, thread_id=321, status="Merging")
-        self.state_store.update_issue_meta(issue_key, github_repo="owner/repo", issue_number="42", plan_state="Approved")
+        self.state_store.update_issue_meta(
+            issue_key, github_repo="owner/repo", issue_number="42", plan_state="Approved"
+        )
         self.state_store.write_artifact(
             issue_key,
             "issue.json",
-            {"repo_full_name": "owner/repo", "number": 42, "title": "Ship scheduler", "url": "https://github.com/owner/repo/issues/42"},
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
         )
         self.client.github_client = MagicMock()
         self.client.github_client.list_project_issues.return_value = [
@@ -172,11 +190,18 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_scheduler_tick_blocks_merging_issue_when_pr_is_still_draft(self) -> None:
         issue_key = "owner/repo#42"
         self.state_store.create_issue_record(issue_key, thread_id=321, status="Merging")
-        self.state_store.update_issue_meta(issue_key, github_repo="owner/repo", issue_number="42", plan_state="Approved")
+        self.state_store.update_issue_meta(
+            issue_key, github_repo="owner/repo", issue_number="42", plan_state="Approved"
+        )
         self.state_store.write_artifact(
             issue_key,
             "issue.json",
-            {"repo_full_name": "owner/repo", "number": 42, "title": "Ship scheduler", "url": "https://github.com/owner/repo/issues/42"},
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
         )
         self.state_store.write_artifact(
             issue_key,

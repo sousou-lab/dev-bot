@@ -80,6 +80,7 @@ async def ensure_issue_for_thread(
         state_store.write_artifact(thread_id, "issue.json", issue)
     return issue
 
+
 async def enqueue_issue_run(
     *,
     thread_id: int,

@@ -43,7 +43,9 @@ class DiscordIssueMirroringTests(unittest.IsolatedAsyncioTestCase):
     async def test_ensure_issue_thread_binding_creates_status_thread_and_binds_issue(self) -> None:
         issue_key = "owner/repo#42"
         self.state_store.create_issue_record(issue_key, status="Ready")
-        self.state_store.update_issue_meta(issue_key, plan_state="Approved", github_repo="owner/repo", issue_number="42")
+        self.state_store.update_issue_meta(
+            issue_key, plan_state="Approved", github_repo="owner/repo", issue_number="42"
+        )
         self.state_store.write_artifact(
             issue_key,
             "issue.json",
@@ -61,7 +63,9 @@ class DiscordIssueMirroringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("99901", self.state_store.thread_id_for_issue(issue_key))
         self.assertEqual(issue_key, self.state_store.issue_key_for_thread(99901))
         self.assertEqual(1, len(self.status_channel.created_threads))
-        self.assertIn("GitHub Issue を status mirror thread に同期しました。", self.status_channel.created_threads[0].messages[0])
+        self.assertIn(
+            "GitHub Issue を status mirror thread に同期しました。", self.status_channel.created_threads[0].messages[0]
+        )
         summary = self.state_store.load_artifact(issue_key, "requirement_summary.json")
         self.assertEqual("Ship scheduler", summary["goal"])
         self.assertEqual(["Ship scheduler"], summary["acceptance_criteria"])

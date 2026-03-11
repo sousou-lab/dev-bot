@@ -42,9 +42,10 @@ class Orchestrator:
     async def enqueue(self, item: WorkItem) -> bool:
         item_key = self._item_key(item)
         if (
-            item.thread_id is not None
-            and item.thread_id in self._queued_thread_ids
-        ) or item_key in self._running_keys or item_key in self._queued_keys:
+            (item.thread_id is not None and item.thread_id in self._queued_thread_ids)
+            or item_key in self._running_keys
+            or item_key in self._queued_keys
+        ):
             return False
         if item.thread_id is not None and self._is_key_running(item_key):
             return False
@@ -111,14 +112,18 @@ class Orchestrator:
                 self._thread_to_key[item.thread_id] = item_key
             self._queued_keys.discard(item_key)
             self._cleanup_finished()
-            self.state_store.update_meta(item.issue_key or item.workspace_key or item.thread_id or item_key, runtime_status="running")
+            self.state_store.update_meta(
+                item.issue_key or item.workspace_key or item.thread_id or item_key, runtime_status="running"
+            )
             task = asyncio.create_task(self._run_item(item))
             self._running[item_key] = task
             self._running_keys.add(item_key)
 
     async def _run_item(self, item: WorkItem) -> None:
         item_key = self._item_key(item)
-        status_target = item.issue_key or item.workspace_key or (item.thread_id if item.thread_id is not None else item_key)
+        status_target = (
+            item.issue_key or item.workspace_key or (item.thread_id if item.thread_id is not None else item_key)
+        )
         try:
             await self.executor(item)
         except Exception as exc:
@@ -141,7 +146,9 @@ class Orchestrator:
             self._running.pop(item_key, None)
 
     def _item_key(self, item: WorkItem) -> str:
-        return item.issue_key or item.workspace_key or f"{item.repo_full_name}#{item.issue.get('number', item.thread_id)}"
+        return (
+            item.issue_key or item.workspace_key or f"{item.repo_full_name}#{item.issue.get('number', item.thread_id)}"
+        )
 
     def _is_key_running(self, item_key: str) -> bool:
         task = self._running.get(item_key)

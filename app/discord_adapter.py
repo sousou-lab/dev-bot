@@ -838,7 +838,9 @@ class DevBotClient(discord.Client):
             title = title[:60].rstrip() + "..."
         return f"dev-bot | {repo}#{number} | {title or 'issue'}"
 
-    async def _post_issue_mirror_summary(self, thread: discord.Thread | Any, issue_key: str, issue: dict[str, Any]) -> None:
+    async def _post_issue_mirror_summary(
+        self, thread: discord.Thread | Any, issue_key: str, issue: dict[str, Any]
+    ) -> None:
         summary_bootstrapped = self._bootstrap_issue_summary(issue_key, issue)
         conversation_bootstrapped = self._bootstrap_issue_conversation(issue_key, issue)
         meta = self.state_store.load_issue_meta(issue_key)
@@ -935,7 +937,14 @@ class DevBotClient(discord.Client):
         summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
         plan = self.state_store.load_artifact(thread_id, "plan.json")
         test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
-        return isinstance(summary, dict) and bool(summary) and isinstance(plan, dict) and bool(plan) and isinstance(test_plan, dict) and bool(test_plan)
+        return (
+            isinstance(summary, dict)
+            and bool(summary)
+            and isinstance(plan, dict)
+            and bool(plan)
+            and isinstance(test_plan, dict)
+            and bool(test_plan)
+        )
 
     def _scheduler_gate_for_issue(self, repo_full_name: str, issue_number: int, issue_key: str) -> dict[str, str]:
         try:
@@ -1012,7 +1021,9 @@ class DevBotClient(discord.Client):
         )
         channel = self.get_channel(thread_id)
         if channel is not None and hasattr(channel, "send"):
-            await channel.send(f"PR を merge しました。Done に更新しました。\n- PR: #{pr['number']}\n- URL: {pr.get('url', '')}")
+            await channel.send(
+                f"PR を merge しました。Done に更新しました。\n- PR: #{pr['number']}\n- URL: {pr.get('url', '')}"
+            )
 
     def _merge_guard_failure(self, pr_status: dict[str, Any]) -> str:
         if bool(pr_status.get("draft")):
@@ -1239,11 +1250,13 @@ class DevBotClient(discord.Client):
 
         meta = self.state_store.load_meta(thread_id)
         issue = self.state_store.load_artifact(thread_id, "issue.json")
-        repo_full_name = (
-            (issue.get("repo_full_name") if isinstance(issue, dict) else "") or str(meta.get("github_repo", ""))
+        repo_full_name = (issue.get("repo_full_name") if isinstance(issue, dict) else "") or str(
+            meta.get("github_repo", "")
         )
         if not repo_full_name:
-            await interaction.response.send_message("repo を決められませんでした。先に `/plan repo:owner/repo` を実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "repo を決められませんでした。先に `/plan repo:owner/repo` を実行してください。", ephemeral=True
+            )
             return
 
         await interaction.response.defer(thinking=True)
@@ -1256,8 +1269,12 @@ class DevBotClient(discord.Client):
                 thread_url=interaction.channel.jump_url if isinstance(interaction.channel, discord.Thread) else "",
             )
             issue_key = self.state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
-            await asyncio.to_thread(self.github_client.update_issue_plan, repo_full_name, int(issue["number"]), "Approved")
-            await asyncio.to_thread(self.github_client.update_issue_state, repo_full_name, int(issue["number"]), "Ready")
+            await asyncio.to_thread(
+                self.github_client.update_issue_plan, repo_full_name, int(issue["number"]), "Approved"
+            )
+            await asyncio.to_thread(
+                self.github_client.update_issue_state, repo_full_name, int(issue["number"]), "Ready"
+            )
             self.state_store.update_draft_meta(thread_id, status="promoted", issue_key=issue_key)
             self.state_store.update_issue_meta(
                 issue_key,
@@ -1291,7 +1308,9 @@ class DevBotClient(discord.Client):
             return
         plan = self.state_store.load_artifact(thread_id, "plan.json")
         if not isinstance(plan, dict) or not plan:
-            await interaction.response.send_message("却下する plan がありません。先に `/plan` を実行してください。", ephemeral=True)
+            await interaction.response.send_message(
+                "却下する plan がありません。先に `/plan` を実行してください。", ephemeral=True
+            )
             return
         self.state_store.update_draft_meta(thread_id, status="changes_requested")
         issue_key = self.state_store.issue_key_for_thread(thread_id)

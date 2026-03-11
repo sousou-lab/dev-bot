@@ -526,7 +526,9 @@ class GitHubIssueClient:
                 f"plan field {self._project_plan_field_id!r} was not found on project {self._project_id!r}"
             )
 
-        self._validate_project_option_ids(field_name="State", expected=self._project_state_option_ids, field=state_field)
+        self._validate_project_option_ids(
+            field_name="State", expected=self._project_state_option_ids, field=state_field
+        )
         self._validate_project_option_ids(field_name="Plan", expected=self._project_plan_option_ids, field=plan_field)
 
         return {
