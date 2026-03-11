@@ -495,6 +495,13 @@ class DevBotClient(discord.Client):
         self._reconcile_thread_runtime_state(thread_id)
         runtime_key = self._runtime_key(thread_id)
         meta = self.state_store.load_meta(runtime_key)
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if issue_key:
+            draft_meta = self.state_store.load_draft_meta(thread_id)
+            draft_status = str(draft_meta.get("status", "")).strip()
+            if draft_status in {"requirements_dialogue", "ready_for_confirmation", "requirements_error"}:
+                meta = dict(meta)
+                meta["status"] = draft_status
         issue = self.state_store.load_artifact(runtime_key, "issue.json")
         pr = self.state_store.load_artifact(runtime_key, "pr.json")
         summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")

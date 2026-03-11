@@ -291,6 +291,35 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Human Review", self.state_store.load_issue_meta(issue_key)["status"])
         self.assertEqual("requirements_dialogue", self.state_store.load_draft_meta(thread_id)["status"])
 
+    async def test_status_command_prefers_dialogue_state_for_issue_bound_thread_ui(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            status="Human Review",
+            issue_number="42",
+            github_repo="owner/repo",
+        )
+        self.state_store.update_draft_meta(thread_id, status="requirements_dialogue")
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Existing issue",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        interaction = _FakeInteraction(_FakeThread(thread_id))
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        await self.client.status_command(interaction)
+
+        self.assertIn("status: `requirements_dialogue`", interaction.response.messages[0][0])
+
     async def test_handle_thread_message_blocks_when_in_progress_process_exists_without_runtime_status(self) -> None:
         thread_id = 321
         issue_key = "owner/repo#42"
