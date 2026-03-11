@@ -802,18 +802,24 @@ class DevBotClient(discord.Client):
                 return
         if self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id):
             return
-        if self.process_registry.load(issue_key):
+        if self.process_registry.is_active(issue_key):
             return
         if not self._has_planning_artifacts(thread_id):
             logger.info("scheduler skip: planning artifacts missing for %s", issue_key)
             return
-        gate = await self._run_blocking(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
-        if gate.get("state") != expected_state or gate.get("plan") != "Approved":
-            return
+        project_enabled = bool(str(getattr(self.settings, "github_project_id", "")).strip())
+        if project_enabled:
+            gate = await self._run_blocking(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
+            if gate.get("state") != expected_state or gate.get("plan") != "Approved":
+                return
         issue = self.state_store.load_artifact(issue_key, "issue.json")
         if not isinstance(issue, dict) or not issue:
             issue = self.state_store.load_artifact(thread_id, "issue.json")
         if not isinstance(issue, dict) or not issue:
+            return
+        issue_state = str(issue.get("state", "")).strip().upper()
+        if issue_state == "CLOSED":
+            logger.info("scheduler skip: issue is closed for %s", issue_key)
             return
         await enqueue_issue_run(
             thread_id=thread_id,
@@ -1632,7 +1638,7 @@ class DevBotClient(discord.Client):
                     await self._maybe_post_pending_approval(channel)
                 continue
             if str(meta.get("status")) == "In Progress":
-                if self.process_registry.load(issue_key):
+                if self.process_registry.is_active(issue_key):
                     continue
                 self.state_store.update_status(issue_key, "Rework")
                 self.state_store.update_meta(issue_key, runtime_status="")
@@ -1648,7 +1654,8 @@ class DevBotClient(discord.Client):
             if str(meta.get("status")) != "Ready" and str(meta.get("status")) != "Rework":
                 continue
             issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
-            if repo_full_name and issue_number:
+            project_enabled = bool(str(getattr(self.settings, "github_project_id", "")).strip())
+            if project_enabled and repo_full_name and issue_number:
                 gate = await self._run_blocking(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
                 if gate.get("state") not in {"Ready", "Rework"} or gate.get("plan") != "Approved":
                     continue

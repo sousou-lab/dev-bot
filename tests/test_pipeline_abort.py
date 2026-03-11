@@ -56,3 +56,18 @@ class PipelineAbortTests(unittest.IsolatedAsyncioTestCase):
         meta = self.state_store.load_issue_meta("owner/repo#42")
         self.assertEqual("In Progress", meta["status"])
         self.assertEqual("running", meta["runtime_status"])
+
+    async def test_abort_falls_back_to_legacy_thread_process_record(self) -> None:
+        calls: list[object] = []
+
+        def terminate(target):
+            calls.append(target)
+            return target == 321
+
+        self.process_registry.terminate = terminate  # type: ignore[method-assign]
+
+        stopped = await self.pipeline.abort(321)
+
+        self.assertTrue(stopped)
+        self.assertEqual(["owner/repo#42", 321], calls)
+        self.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Blocked")

@@ -68,6 +68,27 @@ class ProcessRegistry:
             return False
         return True
 
+    def is_active(self, issue_key: str | int) -> bool:
+        payload = self.load(issue_key)
+        if not payload:
+            return False
+        pgid = int(payload.get("pgid", 0) or 0)
+        pid = int(payload.get("pid", 0) or 0)
+        try:
+            if pgid > 0:
+                os.killpg(pgid, 0)
+                return True
+            if pid > 0:
+                os.kill(pid, 0)
+                return True
+        except ProcessLookupError:
+            self.unregister(issue_key)
+            return False
+        except PermissionError:
+            return True
+        self.unregister(issue_key)
+        return False
+
     def _record_path(self, issue_key: str) -> Path:
         safe_key = issue_key.replace("/", "__").replace("#", "__")
         return self.root / f"{safe_key}.json"

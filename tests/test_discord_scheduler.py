@@ -642,6 +642,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_restore_pending_runs_skips_ready_issue_when_plan_is_no_longer_approved(self) -> None:
         issue_key = "owner/repo#42"
+        self.client.settings.github_project_id = "project-1"
         self.state_store.create_issue_record(issue_key, thread_id=321, status="Ready")
         self.state_store.update_issue_meta(
             issue_key,
@@ -665,10 +666,116 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             "state": "Ready",
             "plan": "Changes Requested",
         }
-        enqueue_mock = MagicMock()
-        self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
+        restore_mock = AsyncMock()
+        self.client.orchestrator.restore = restore_mock  # type: ignore[method-assign]
 
         await self.client._restore_pending_runs()
+
+        restore_mock.assert_not_called()
+
+    async def test_restore_pending_runs_restores_ready_issue_without_project_configuration(self) -> None:
+        issue_key = "owner/repo#42"
+        self.client.settings.github_project_id = ""
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Ready")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        restored: list[object] = []
+
+        async def _restore(items):
+            restored.extend(items)
+
+        self.client.orchestrator.restore = _restore  # type: ignore[method-assign]
+
+        await self.client._restore_pending_runs()
+
+        self.assertEqual(1, len(restored))
+        self.assertEqual(issue_key, restored[0].issue_key)
+
+    async def test_dispatch_issue_if_ready_ignores_stale_process_record(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Ready")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.state_store.write_artifact(321, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.write_artifact(321, "plan.json", {"steps": ["one"]})
+        self.state_store.write_artifact(321, "test_plan.json", {"checks": ["tests"]})
+        self.client.process_registry.register(issue_key, "run-1", pid=999999, runner_type="codex")
+        enqueue_mock = AsyncMock(return_value=True)
+        self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
+
+        await self.client._dispatch_issue_if_ready(
+            thread_id=321,
+            issue_key=issue_key,
+            repo_full_name="owner/repo",
+            issue_number=42,
+            expected_state="Ready",
+        )
+
+        enqueue_mock.assert_called_once()
+        self.assertEqual({}, self.client.process_registry.load(issue_key))
+
+    async def test_dispatch_issue_if_ready_skips_closed_issue(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Ready")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+                "state": "CLOSED",
+            },
+        )
+        self.state_store.write_artifact(321, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.write_artifact(321, "plan.json", {"steps": ["one"]})
+        self.state_store.write_artifact(321, "test_plan.json", {"checks": ["tests"]})
+        enqueue_mock = AsyncMock(return_value=True)
+        self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
+
+        await self.client._dispatch_issue_if_ready(
+            thread_id=321,
+            issue_key=issue_key,
+            repo_full_name="owner/repo",
+            issue_number=42,
+            expected_state="Ready",
+        )
 
         enqueue_mock.assert_not_called()
 
