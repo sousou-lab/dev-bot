@@ -1066,7 +1066,7 @@ class DevBotClient(discord.Client):
         if mergeable is False:
             return "PR is not mergeable"
         mergeable_state = str(pr_status.get("mergeable_state", "")).strip().lower()
-        if mergeable_state and mergeable_state not in {"clean", "has_hooks", "unstable"}:
+        if mergeable_state and mergeable_state not in {"clean", "has_hooks"}:
             return f"mergeable_state={mergeable_state}"
         return ""
 

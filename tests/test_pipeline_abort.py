@@ -37,8 +37,22 @@ class PipelineAbortTests(unittest.IsolatedAsyncioTestCase):
         self.tmpdir.cleanup()
 
     async def test_abort_updates_bound_issue_state_to_blocked(self) -> None:
+        self.process_registry.terminate = lambda target: True  # type: ignore[method-assign]
+
         await self.pipeline.abort(321)
 
         self.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Blocked")
         meta = self.state_store.load_issue_meta("owner/repo#42")
         self.assertEqual("Blocked", meta["status"])
+
+    async def test_abort_is_noop_when_no_live_process_exists(self) -> None:
+        self.state_store.update_issue_meta("owner/repo#42", status="In Progress", runtime_status="running")
+        self.process_registry.terminate = lambda target: False  # type: ignore[method-assign]
+
+        stopped = await self.pipeline.abort(321)
+
+        self.assertFalse(stopped)
+        self.github_client.update_issue_state.assert_not_called()
+        meta = self.state_store.load_issue_meta("owner/repo#42")
+        self.assertEqual("In Progress", meta["status"])
+        self.assertEqual("running", meta["runtime_status"])

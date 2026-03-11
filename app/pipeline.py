@@ -71,6 +71,8 @@ class DevelopmentPipeline:
         issue_key = self.state_store.issue_key_for_thread(thread_id)
         target = issue_key or thread_id
         stopped = await self._run_blocking(self.process_registry.terminate, target)
+        if not stopped:
+            return False
         self.state_store.update_meta(target, runtime_status="")
         self.state_store.update_status(target, "Blocked")
         if issue_key:
