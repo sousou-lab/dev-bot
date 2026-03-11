@@ -107,6 +107,12 @@ class _FakeThread:
         self.messages.append(content)
 
 
+class _FakeMessage:
+    def __init__(self, channel: object, *, message_id: int = 1) -> None:
+        self.channel = channel
+        self.id = message_id
+
+
 class _FakeResponse:
     def __init__(self) -> None:
         self.messages: list[tuple[str, bool]] = []
@@ -175,6 +181,34 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("91234", self.state_store.thread_id_for_issue("owner/repo#42"))
         self.assertEqual(1, len(self.status_channel.created_threads))
 
+    async def test_scheduler_tick_does_not_dispatch_from_local_cache_when_project_sync_fails(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Ready")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.client.github_client = MagicMock()
+        self.client.github_client.list_project_issues.side_effect = RuntimeError("project unavailable")
+        enqueue_mock = MagicMock()
+        self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
+
+        await self.client._scheduler_tick()
+
+        enqueue_mock.assert_not_called()
+
     async def test_revise_keeps_issue_identity_for_issue_bound_thread(self) -> None:
         self.state_store.create_run(thread_id=321, parent_message_id=10, channel_id=20)
         self.state_store.bind_issue(321, "owner/repo", 42)
@@ -212,6 +246,85 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             [("要件整理を再開しました。修正内容を投稿してください。", True)],
             interaction.response.messages,
         )
+
+    async def test_handle_thread_message_blocks_when_in_progress_process_exists_without_runtime_status(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            status="In Progress",
+            issue_number="42",
+            github_repo="owner/repo",
+            runtime_status="",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {"repo_full_name": "owner/repo", "number": 42, "title": "Existing issue"},
+        )
+        self.client.process_registry.register(issue_key, "run-1", pid=1, runner_type="codex")
+        called = {"parse": False}
+
+        async def _parse_message_inputs(_message):
+            called["parse"] = True
+            return {"error": None}
+
+        self.client._parse_message_inputs = _parse_message_inputs  # type: ignore[method-assign]
+        message = _FakeMessage(_FakeThread(thread_id))
+
+        await self.client._handle_thread_message(message)
+
+        self.assertFalse(called["parse"])
+        self.assertEqual("running", self.state_store.load_issue_meta(issue_key)["runtime_status"])
+
+    async def test_scheduler_tick_reconciles_orphaned_in_progress_issue_by_issue_key(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, status="In Progress")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="running",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.client.github_client = MagicMock()
+        self.client.github_client.list_project_issues.return_value = [
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "body": "body",
+                "url": "https://github.com/owner/repo/issues/42",
+                "issue_state": "OPEN",
+                "state": "In Progress",
+                "plan": "Approved",
+            }
+        ]
+
+        async def _ensure_issue_thread_binding(_issue_key: str) -> int:
+            return 0
+
+        self.client._ensure_issue_thread_binding = _ensure_issue_thread_binding  # type: ignore[method-assign]
+        self.client.github_client.update_issue_state.return_value = None
+
+        await self.client._scheduler_tick()
+
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("Rework", meta["status"])
+        self.assertEqual("", meta["runtime_status"])
+        self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Rework")
 
     async def test_scheduler_tick_merges_pr_when_state_is_merging(self) -> None:
         issue_key = "owner/repo#42"

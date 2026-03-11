@@ -324,12 +324,13 @@ class DevBotClient(discord.Client):
         self._reconcile_thread_runtime_state(thread_id)
         meta = self.state_store.load_meta(thread_id)
         runtime_status = str(meta.get("runtime_status", "")).strip()
+        has_process = bool(self.process_registry.load(self._runtime_key(thread_id)))
         if str(meta.get("status", "")) == "planning" or runtime_status in {
             "queued",
             "running",
             "verifying",
             "awaiting_high_risk_approval",
-        }:
+        } or (str(meta.get("status", "")).strip() == "In Progress" and has_process):
             return
         parsed = await self._parse_message_inputs(message)
         if parsed["error"]:
@@ -712,7 +713,7 @@ class DevBotClient(discord.Client):
                     )
                     continue
                 if status == "In Progress":
-                    self._reconcile_thread_runtime_state(thread_id)
+                    self._reconcile_runtime_state(issue_key if thread_id <= 0 else thread_id, thread_id=thread_id)
                     continue
                 if status == "Merging":
                     await self._process_merging_issue(
@@ -727,10 +728,11 @@ class DevBotClient(discord.Client):
             project_issues = self.github_client.list_project_issues()
         except Exception as exc:
             logger.warning("scheduler project sync failed: %s", exc)
-            project_issues = []
+            return []
 
         if not project_issues:
-            return self.state_store.list_issue_records()
+            logger.warning("scheduler project sync returned no items; skipping scheduler actions")
+            return []
 
         synced_issue_keys: list[str] = []
         for project_issue in project_issues:
@@ -960,14 +962,11 @@ class DevBotClient(discord.Client):
             gate = self.github_client.get_issue_project_fields(repo_full_name, issue_number)
         except Exception as exc:
             logger.warning("scheduler gate lookup failed for %s: %s", issue_key, exc)
-            gate = {}
+            return {}
         if gate.get("state") and gate.get("plan"):
             return gate
-        meta = self.state_store.load_meta(issue_key)
-        return {
-            "state": str(gate.get("state") or meta.get("status", "")).strip(),
-            "plan": str(gate.get("plan") or meta.get("plan_state", "")).strip(),
-        }
+        logger.warning("scheduler gate incomplete for %s: %s", issue_key, gate)
+        return {}
 
     async def _process_merging_issue(
         self,
@@ -1414,7 +1413,10 @@ class DevBotClient(discord.Client):
         }
 
     def _reconcile_thread_runtime_state(self, thread_id: int) -> None:
-        runtime_key = self._runtime_key(thread_id)
+        self._reconcile_runtime_state(thread_id, thread_id=thread_id)
+
+    def _reconcile_runtime_state(self, identifier: str | int, *, thread_id: int = 0) -> None:
+        runtime_key = identifier if isinstance(identifier, str) else self._runtime_key(identifier)
         meta = self.state_store.load_meta(runtime_key)
         state = str(meta.get("status", "")).strip()
         runtime_status = str(meta.get("runtime_status", "")).strip()
@@ -1426,12 +1428,18 @@ class DevBotClient(discord.Client):
         }:
             return
         has_process = bool(self.process_registry.load(runtime_key))
-        is_active = self.orchestrator.is_running(thread_id) or self.orchestrator.is_queued(thread_id) or has_process
+        is_active = (
+            (thread_id > 0 and self.orchestrator.is_running(thread_id))
+            or (thread_id > 0 and self.orchestrator.is_queued(thread_id))
+            or has_process
+        )
         if runtime_status == "awaiting_high_risk_approval":
             pending = self.state_store.load_artifact(runtime_key, "pending_approval.json")
             if isinstance(pending, dict) and pending.get("status") == "pending":
                 return
         if is_active:
+            if state == "In Progress" and has_process and not runtime_status:
+                self.state_store.update_meta(runtime_key, runtime_status="running")
             return
         next_state = "Rework"
         self.state_store.update_meta(runtime_key, runtime_status="")
