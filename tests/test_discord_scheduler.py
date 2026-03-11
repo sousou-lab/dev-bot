@@ -283,6 +283,65 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(called["parse"])
         self.assertEqual("running", self.state_store.load_issue_meta(issue_key)["runtime_status"])
 
+    async def test_handle_thread_message_keeps_execution_artifacts_for_human_review(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            status="Human Review",
+            issue_number="42",
+            github_repo="owner/repo",
+        )
+        self.state_store.write_artifact(issue_key, "verification.json", {"checks": ["pytest"]})
+        self.state_store.write_artifact(
+            issue_key,
+            "final_summary.json",
+            {"summary": "ready for review"},
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "pr.json",
+            {"number": 99, "url": "https://github.com/owner/repo/pull/99"},
+        )
+
+        async def _parse_message_inputs(_message):
+            return {"error": None}
+
+        async def _materialize_message_payload(_thread_id, _message, _parsed):
+            del _message, _parsed
+            return "follow-up question"
+
+        async def _send_channel_text(_channel, _content):
+            del _channel, _content
+            return None
+
+        self.client._parse_message_inputs = _parse_message_inputs  # type: ignore[method-assign]
+        self.client._materialize_message_payload = _materialize_message_payload  # type: ignore[method-assign]
+        self.client._send_channel_text = _send_channel_text  # type: ignore[method-assign]
+        self.client.requirements_agent = MagicMock()
+        self.client.requirements_agent.build_reply.return_value = MagicMock(
+            body="Under review",
+            status="Human Review",
+            artifacts={},
+        )
+
+        await self.client._handle_thread_message(_FakeMessage(_FakeThread(thread_id)))
+
+        self.assertEqual(
+            {"checks": ["pytest"]},
+            self.state_store.load_artifact(issue_key, "verification.json"),
+        )
+        self.assertEqual(
+            {"summary": "ready for review"},
+            self.state_store.load_artifact(issue_key, "final_summary.json"),
+        )
+        self.assertEqual(
+            {"number": 99, "url": "https://github.com/owner/repo/pull/99"},
+            self.state_store.load_artifact(issue_key, "pr.json"),
+        )
+
     async def test_scheduler_tick_reconciles_orphaned_in_progress_issue_by_issue_key(self) -> None:
         issue_key = "owner/repo#42"
         self.state_store.create_issue_record(issue_key, status="In Progress")
@@ -1017,6 +1076,58 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.client._promote_approved_plan(interaction)
 
         self.client.github_client.add_issue_to_project.assert_called_with("owner/repo", 42)
+
+    async def test_promote_approved_plan_marks_promotion_failed_when_project_addition_fails(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.write_artifact(thread_id, "plan.json", {"steps": ["one"]})
+        self.state_store.write_artifact(thread_id, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.update_draft_meta(thread_id, github_repo="owner/repo")
+        self.client.github_client = MagicMock()
+        self.client.github_client.create_issue.return_value = MagicMock(
+            repo_full_name="owner/repo",
+            number=42,
+            title="Ship scheduler",
+            body="body",
+            url="https://github.com/owner/repo/issues/42",
+        )
+        self.client.github_client.add_issue_to_project.side_effect = RuntimeError("project unavailable")
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+            async def send_message(self, content: str, *, ephemeral: bool = False) -> None:
+                del content, ephemeral
+
+        class _Chan(_FakeThread):
+            jump_url = "https://discord.test/thread/321"
+
+            def __init__(self, channel_id: int) -> None:
+                super().__init__(channel_id)
+
+        interaction = MagicMock()
+        interaction.channel = _Chan(thread_id)
+        interaction.response = _Resp()
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+        sent: list[str] = []
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, ephemeral
+            sent.append(content)
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+
+        await self.client._promote_approved_plan(interaction)
+
+        self.assertEqual("promotion_failed", self.state_store.load_draft_meta(thread_id)["status"])
+        self.assertEqual("owner/repo#42", self.state_store.issue_key_for_thread(thread_id))
+        self.assertEqual(
+            42,
+            self.state_store.load_artifact("owner/repo#42", "issue.json")["number"],
+        )
+        self.assertTrue(sent)
 
     async def test_promote_approved_plan_enqueues_directly_when_project_is_unconfigured(self) -> None:
         thread_id = 321

@@ -341,7 +341,7 @@ class DevBotClient(discord.Client):
         if parsed["error"]:
             await self._send_channel_text(message.channel, str(parsed["error"]))
             return
-        if meta.get("status") in {"awaiting_approval", "Human Review", "Blocked", "Cancelled", "Done"}:
+        if meta.get("status") in {"awaiting_approval"}:
             self._clear_execution_artifacts(thread_id)
         user_payload = await self._materialize_message_payload(thread_id, message, parsed)
         self.state_store.append_message(thread_id, "user", user_payload)
@@ -1335,9 +1335,9 @@ class DevBotClient(discord.Client):
                 github_client=self.github_client,
                 thread_url=interaction.channel.jump_url if isinstance(interaction.channel, discord.Thread) else "",
             )
-            await self._run_blocking(self.github_client.add_issue_to_project, repo_full_name, int(issue["number"]))
             issue_key = self.state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
             promoted_issue_key = issue_key
+            await self._run_blocking(self.github_client.add_issue_to_project, repo_full_name, int(issue["number"]))
             await self._run_blocking(
                 self.github_client.update_issue_plan, repo_full_name, int(issue["number"]), "Approved"
             )
