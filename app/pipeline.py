@@ -474,6 +474,12 @@ class DevelopmentPipeline:
             head_sha = str(pr_status.get("head_sha", "")).strip()
             if head_sha:
                 pr["head_sha"] = head_sha
+        await asyncio.to_thread(
+            self.github_client.ready_pull_request_for_review,
+            repo_full_name,
+            int(pr["number"]),
+        )
+        pr["draft"] = False
         self.state_store.write_artifact(issue_key, "pr.json", pr)
         self.state_store.write_execution_artifact(issue_key, "pr.json", pr, run_id)
         comment_body = self._build_pr_comment(channel_url, verification, review, command_results)

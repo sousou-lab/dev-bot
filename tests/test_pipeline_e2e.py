@@ -85,6 +85,7 @@ class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
             "mergeable_state": "clean",
             "head_sha": "headsha123",
         }
+        self.github_client.ready_pull_request_for_review.return_value = {"ready_for_review": True}
         self.github_client.create_issue_comment.return_value = None
         self.github_client.update_issue_state.return_value = None
         self.github_client.upsert_workpad_comment.return_value = None
@@ -195,6 +196,8 @@ class TestFullSuccessPath(PipelineE2EBase):
         meta = self.state_store.load_meta(ISSUE_KEY)
         self.assertEqual(meta.get("status"), "Human Review")
         self.assertEqual("headsha123", self.state_store.load_artifact(ISSUE_KEY, "pr.json")["head_sha"])
+        self.github_client.ready_pull_request_for_review.assert_called_with("owner/repo", 99)
+        self.assertFalse(self.state_store.load_artifact(ISSUE_KEY, "pr.json")["draft"])
 
     async def test_message_order_in_success_path(self) -> None:
         with (

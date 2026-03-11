@@ -1593,6 +1593,11 @@ class DevBotClient(discord.Client):
                 continue
             if str(meta.get("status")) != "Ready" and str(meta.get("status")) != "Rework":
                 continue
+            issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
+            if repo_full_name and issue_number:
+                gate = await asyncio.to_thread(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
+                if gate.get("state") not in {"Ready", "Rework"} or gate.get("plan") != "Approved":
+                    continue
             items.append(
                 WorkItem(
                     thread_id=thread_id,

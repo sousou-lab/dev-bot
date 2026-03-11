@@ -107,6 +107,15 @@ class GitHubIssueClient:
             "sha": str(getattr(merged, "sha", "")),
         }
 
+    def ready_pull_request_for_review(self, repo_full_name: str, pull_number: int) -> dict[str, Any]:
+        repo = self._get_repo(repo_full_name)
+        try:
+            pull = repo.get_pull(number=pull_number)
+            pull.mark_ready_for_review()
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub PR ready-for-review failed: {getattr(exc, 'data', exc)}") from exc
+        return {"ready_for_review": True}
+
     def get_pull_request_status(self, repo_full_name: str, pull_number: int) -> dict[str, Any]:
         repo = self._get_repo(repo_full_name)
         try:
