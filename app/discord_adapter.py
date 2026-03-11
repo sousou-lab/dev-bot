@@ -1236,6 +1236,17 @@ class DevBotClient(discord.Client):
             github_repo=repo,
             base_branch=str(artifacts["planning_workspace"].get("base_branch", "")),
         )
+        issue_key = self.state_store.issue_key_for_thread(thread_id)
+        if issue_key:
+            issue_meta = self.state_store.load_issue_meta(issue_key)
+            issue_number = int(str(issue_meta.get("issue_number", "0")).strip() or 0)
+            issue_repo = str(issue_meta.get("github_repo", "")).strip() or repo
+            if issue_repo and issue_number:
+                try:
+                    await asyncio.to_thread(self.github_client.update_issue_plan, issue_repo, issue_number, "Drafted")
+                except Exception as exc:
+                    logger.warning("plan: failed to reset GitHub plan field for %s: %s", issue_key, exc)
+                self.state_store.update_issue_meta(issue_key, plan_state="Drafted")
         self.state_store.write_artifact(thread_id, "planning_progress.json", {"status": "completed", "phase": "done"})
         prefix = "互換コマンド `/confirm` を `/plan` として扱いました。\n\n" if alias_used else ""
         plan_message = prefix + self._format_plan_message(repo, artifacts["plan"], artifacts["test_plan"])
@@ -1292,6 +1303,7 @@ class DevBotClient(discord.Client):
                 github_client=self.github_client,
                 thread_url=interaction.channel.jump_url if isinstance(interaction.channel, discord.Thread) else "",
             )
+            await asyncio.to_thread(self.github_client.add_issue_to_project, repo_full_name, int(issue["number"]))
             issue_key = self.state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
             promoted_issue_key = issue_key
             await asyncio.to_thread(

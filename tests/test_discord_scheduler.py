@@ -447,3 +447,90 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("promotion_failed", self.state_store.load_draft_meta(thread_id)["status"])
         self.assertTrue(sent)
+
+    async def test_generate_plan_resets_remote_plan_to_drafted_for_bound_issue(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta("owner/repo#42", github_repo="owner/repo", issue_number="42")
+        self.client.github_client = MagicMock()
+        self.client._build_plan_artifacts = MagicMock(
+            return_value={
+                "plan": {"steps": ["one"]},
+                "test_plan": {"checks": ["tests"]},
+                "repo_profile": {"repo": "owner/repo"},
+                "planning_workspace": {"base_branch": "main"},
+                "planning_sessions": {},
+            }
+        )
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+        class _Chan(_FakeThread):
+            def __init__(self, channel_id: int) -> None:
+                super().__init__(channel_id)
+
+        interaction = MagicMock()
+        interaction.channel = _Chan(thread_id)
+        interaction.response = _Resp()
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, content, ephemeral
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+
+        await self.client._generate_plan(interaction, "owner/repo", alias_used=False)
+
+        self.client.github_client.update_issue_plan.assert_called_with("owner/repo", 42, "Drafted")
+
+    async def test_promote_approved_plan_adds_new_issue_to_project_before_updating_fields(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.write_artifact(thread_id, "plan.json", {"steps": ["one"]})
+        self.state_store.write_artifact(thread_id, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.update_draft_meta(thread_id, github_repo="owner/repo")
+        self.client.github_client = MagicMock()
+        self.client.github_client.create_issue.return_value = MagicMock(
+            repo_full_name="owner/repo",
+            number=42,
+            title="Ship scheduler",
+            body="body",
+            url="https://github.com/owner/repo/issues/42",
+        )
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+            async def send_message(self, content: str, *, ephemeral: bool = False) -> None:
+                del content, ephemeral
+
+        class _Chan(_FakeThread):
+            jump_url = "https://discord.test/thread/321"
+
+            def __init__(self, channel_id: int) -> None:
+                super().__init__(channel_id)
+
+        interaction = MagicMock()
+        interaction.channel = _Chan(thread_id)
+        interaction.response = _Resp()
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, content, ephemeral
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+
+        async def _scheduler_tick() -> None:
+            return None
+
+        self.client._scheduler_tick = _scheduler_tick  # type: ignore[method-assign]
+
+        await self.client._promote_approved_plan(interaction)
+
+        self.client.github_client.add_issue_to_project.assert_called_with("owner/repo", 42)

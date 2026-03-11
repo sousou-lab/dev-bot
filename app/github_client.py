@@ -243,6 +243,38 @@ class GitHubIssueClient:
             raise RuntimeError(f"GitHub issue plan update failed: {getattr(exc, 'data', exc)}") from exc
         return {"plan": plan_state, "project_updated": project_updated}
 
+    def add_issue_to_project(self, repo_full_name: str, issue_number: int) -> dict[str, Any]:
+        if not self._project_id:
+            return {"project_updated": False}
+        repo = self._get_repo(repo_full_name)
+        try:
+            issue = repo.get_issue(number=issue_number)
+            item_id = self._find_project_item_id(getattr(issue, "node_id", ""))
+            if item_id:
+                return {"project_updated": True, "item_id": item_id, "already_present": True}
+            mutation = """
+            mutation($projectId:ID!, $contentId:ID!) {
+              addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) {
+                item { id }
+              }
+            }
+            """
+            payload = self._graphql(
+                mutation,
+                {
+                    "projectId": self._project_id,
+                    "contentId": getattr(issue, "node_id", ""),
+                },
+            )
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub project add failed: {getattr(exc, 'data', exc)}") from exc
+        item = payload.get("addProjectV2ItemById", {}).get("item", {}) if isinstance(payload, dict) else {}
+        return {
+            "project_updated": bool(item),
+            "item_id": str(item.get("id", "") or ""),
+            "already_present": False,
+        }
+
     def upsert_workpad_comment(
         self,
         repo_full_name: str,

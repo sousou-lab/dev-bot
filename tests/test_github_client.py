@@ -345,6 +345,27 @@ class GitHubIssueClientTests(unittest.TestCase):
         query_text = graphql_mock.call_args.args[0]
         self.assertIn("fieldValues(first:100)", query_text)
 
+    def test_add_issue_to_project_creates_project_item_when_missing(self) -> None:
+        client = GitHubIssueClient("token", project_id="project-1")
+        repo = Mock()
+        issue = Mock(node_id="issue-node")
+        repo.get_issue.return_value = issue
+
+        with (
+            patch.object(client, "_get_repo", return_value=repo),
+            patch.object(client, "_find_project_item_id", return_value=""),
+            patch.object(
+                client,
+                "_graphql",
+                return_value={"addProjectV2ItemById": {"item": {"id": "item-1"}}},
+            ) as graphql_mock,
+        ):
+            result = client.add_issue_to_project("owner/repo", 42)
+
+        self.assertEqual({"project_updated": True, "item_id": "item-1", "already_present": False}, result)
+        query_text = graphql_mock.call_args.args[0]
+        self.assertIn("addProjectV2ItemById", query_text)
+
     def test_merge_pull_request_returns_merge_result(self) -> None:
         client = GitHubIssueClient("token")
         repo = Mock()
