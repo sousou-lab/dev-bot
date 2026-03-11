@@ -377,24 +377,25 @@ class GitHubIssueClient:
         return data if isinstance(data, dict) else {}
 
     def _list_installation_repositories(self) -> list[str]:
-        request = urllib.request.Request(
-            "https://api.github.com/installation/repositories",
-            headers={
-                "Authorization": f"Bearer {self.installation_token()}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"GitHub installation repository listing failed: {exc}") from exc
-        repositories = body.get("repositories", [])
-        if not isinstance(repositories, list):
-            return []
-        names = [str(repo.get("full_name", "")).strip() for repo in repositories if isinstance(repo, dict)]
+        names: set[str] = set()
+        next_url = "https://api.github.com/installation/repositories?per_page=100"
+        headers = {
+            "Authorization": f"Bearer {self.installation_token()}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        while next_url:
+            request = urllib.request.Request(next_url, headers=headers, method="GET")
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                    link_header = response.headers.get("Link", "")
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"GitHub installation repository listing failed: {exc}") from exc
+            repositories = body.get("repositories", [])
+            if isinstance(repositories, list):
+                names.update(str(repo.get("full_name", "")).strip() for repo in repositories if isinstance(repo, dict))
+            next_url = _parse_next_link(link_header)
         return sorted(name for name in names if name)
 
 
@@ -480,3 +481,15 @@ def _repository_match_score(repo: str, needle: str) -> tuple[int, int] | None:
     if needle in lowered:
         return (6, lowered.find(needle))
     return None
+
+
+def _parse_next_link(link_header: str) -> str:
+    for part in link_header.split(","):
+        section = part.strip()
+        if 'rel="next"' not in section:
+            continue
+        if not section.startswith("<"):
+            continue
+        url, _, _rest = section.partition(">")
+        return url[1:].strip()
+    return ""

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import base64
+import json
 import unittest
 from unittest.mock import patch
 
-from app.github_client import GitHubIssueClient, _parse_option_ids, render_workpad
+from app.github_client import GitHubIssueClient, _parse_next_link, _parse_option_ids, render_workpad
 
 
 class GitHubIssueClientTests(unittest.TestCase):
@@ -87,3 +88,45 @@ class GitHubIssueClientTests(unittest.TestCase):
             repos = client.suggest_repositories("hayase", limit=25)
 
         self.assertEqual(["hayasesou/dev-bot", "hayasesou/other"], repos)
+
+    def test_list_installation_repositories_follows_pagination_links(self) -> None:
+        client = GitHubIssueClient(app_id="1", private_key_path="/tmp/key.pem", installation_id="2")
+
+        class _Response:
+            def __init__(self, payload: dict[str, object], link: str = "") -> None:
+                self._payload = payload
+                self.headers = {"Link": link}
+
+            def read(self) -> bytes:
+                return json.dumps(self._payload).encode("utf-8")
+
+            def __enter__(self) -> _Response:
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+                return None
+
+        responses = [
+            _Response(
+                {"repositories": [{"full_name": "hayasesou/GO_piscine"}]},
+                '<https://api.github.com/installation/repositories?page=2>; rel="next"',
+            ),
+            _Response({"repositories": [{"full_name": "hayasesou/slide-system"}]}),
+        ]
+
+        with (
+            patch.object(client, "installation_token", return_value="token"),
+            patch("urllib.request.urlopen", side_effect=responses),
+        ):
+            repos = client._list_installation_repositories()
+
+        self.assertEqual(["hayasesou/GO_piscine", "hayasesou/slide-system"], repos)
+
+    def test_parse_next_link_returns_next_url(self) -> None:
+        link = (
+            '<https://api.github.com/installation/repositories?page=2>; rel="next", '
+            '<https://api.github.com/installation/repositories?page=3>; rel="last"'
+        )
+
+        self.assertEqual("https://api.github.com/installation/repositories?page=2", _parse_next_link(link))
