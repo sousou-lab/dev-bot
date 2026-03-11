@@ -428,6 +428,19 @@ class DevBotClient(discord.Client):
             return
         await self._send_followup_text(interaction, self._format_repo_list_message(repos, query or ""), ephemeral=True)
 
+    def _list_repositories_for_display(self, query: str) -> list[str]:
+        return self.github_client.suggest_repositories(query, limit=100)
+
+    def _format_repo_list_message(self, repos: list[str], query: str) -> str:
+        title = "アクセス可能な repository 一覧"
+        if query:
+            title += f" (`{query}`)"
+        body = "\n".join(f"- `{repo}`" for repo in repos[:50])
+        truncated = ""
+        if len(repos) > 50:
+            truncated = f"\n\n他 {len(repos) - 50} 件"
+        return f"{title}\n\n{body}{truncated}"
+
     async def status_command(self, interaction: discord.Interaction) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
