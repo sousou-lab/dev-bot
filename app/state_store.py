@@ -322,6 +322,11 @@ class FileStateStore:
         if path.exists():
             path.unlink()
 
+    def delete_draft_artifact(self, thread_id: int | str, filename: str) -> None:
+        path = self.draft_dir(thread_id) / filename
+        if path.exists():
+            path.unlink()
+
     def load_meta(self, identifier: str | int) -> dict[str, Any]:
         path = self.entity_dir(identifier) / "meta.json"
         if not path.exists():

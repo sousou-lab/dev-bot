@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock
 
+from app import run_request
 from app.discord_adapter import DevBotClient
 from app.state_store import FileStateStore
 from tests.helpers import make_test_settings
@@ -75,6 +76,17 @@ class DiscordSchedulerTests(unittest.TestCase):
             branch_name="agent/gh-42-test",
             base_branch="main",
         )
+        self.state_store.write_artifact(
+            "owner/repo#42",
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Existing issue",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.state_store.write_artifact("owner/repo#42", "plan.json", {"steps": ["keep identity"]})
 
         self.client._clear_execution_artifacts(1)
 
@@ -82,6 +94,8 @@ class DiscordSchedulerTests(unittest.TestCase):
         self.assertEqual("42", issue_meta["issue_number"])
         self.assertEqual("", issue_meta["pr_number"])
         self.assertEqual("", issue_meta["workspace"])
+        self.assertEqual(42, self.state_store.load_artifact("owner/repo#42", "issue.json")["number"])
+        self.assertEqual({}, self.state_store.load_artifact("owner/repo#42", "plan.json"))
 
 
 class _FakeThread:
@@ -91,6 +105,23 @@ class _FakeThread:
 
     async def send(self, content: str) -> None:
         self.messages.append(content)
+
+
+class _FakeResponse:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, bool]] = []
+
+    def is_done(self) -> bool:
+        return False
+
+    async def send_message(self, content: str, ephemeral: bool = False) -> None:
+        self.messages.append((content, ephemeral))
+
+
+class _FakeInteraction:
+    def __init__(self, channel: object) -> None:
+        self.channel = channel
+        self.response = _FakeResponse()
 
 
 class _FakeStatusChannel:
@@ -110,10 +141,18 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.state_store = FileStateStore(self.tmpdir.name)
         self.settings = make_test_settings(state_dir=self.tmpdir.name)
         self.client = DevBotClient(settings=self.settings, state_store=self.state_store)
+        self._orig_run_request_blocking = run_request.run_blocking
+
+        async def _run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        self.client._run_blocking = _run_blocking  # type: ignore[method-assign]
+        run_request.run_blocking = _run_blocking
         self.status_channel = _FakeStatusChannel()
         self.client.get_channel = lambda channel_id: self.status_channel if channel_id == 67890 else None  # type: ignore[method-assign]
 
     async def asyncTearDown(self) -> None:
+        run_request.run_blocking = self._orig_run_request_blocking
         self.tmpdir.cleanup()
 
     async def test_scheduler_tick_creates_status_thread_for_unbound_issue(self) -> None:
@@ -135,6 +174,44 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("91234", self.state_store.thread_id_for_issue("owner/repo#42"))
         self.assertEqual(1, len(self.status_channel.created_threads))
+
+    async def test_revise_keeps_issue_identity_for_issue_bound_thread(self) -> None:
+        self.state_store.create_run(thread_id=321, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(321, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            "owner/repo#42",
+            status="Human Review",
+            issue_number="42",
+            pr_number="99",
+            workspace="/tmp/work",
+        )
+        self.state_store.write_artifact(
+            "owner/repo#42",
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Existing issue",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.state_store.write_artifact("owner/repo#42", "plan.json", {"steps": ["replan"]})
+
+        self.client._ensure_managed_thread = lambda channel: 321  # type: ignore[method-assign]
+        interaction = _FakeInteraction(_FakeThread(321))
+
+        await self.client.revise_command(interaction)
+
+        issue_meta = self.state_store.load_issue_meta("owner/repo#42")
+        self.assertEqual("42", issue_meta["issue_number"])
+        self.assertEqual("requirements_dialogue", issue_meta["status"])
+        self.assertEqual("", issue_meta["pr_number"])
+        self.assertEqual(42, self.state_store.load_artifact("owner/repo#42", "issue.json")["number"])
+        self.assertEqual({}, self.state_store.load_artifact("owner/repo#42", "plan.json"))
+        self.assertEqual(
+            [("要件整理を再開しました。修正内容を投稿してください。", True)],
+            interaction.response.messages,
+        )
 
     async def test_scheduler_tick_merges_pr_when_state_is_merging(self) -> None:
         issue_key = "owner/repo#42"

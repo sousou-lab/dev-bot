@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +236,10 @@ class DevBotClient(discord.Client):
     def build_approval_view(self) -> discord.ui.View:
         return ApprovalView(self)
 
+    async def _run_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        bound = partial(func, *args, **kwargs)
+        return await asyncio.to_thread(bound)
+
     async def setup_hook(self) -> None:
         for name, description, callback, needs_repo in (
             ("plan", "repo を読んで plan.json と test_plan.json を作成します", self.plan_command, True),
@@ -303,7 +308,7 @@ class DevBotClient(discord.Client):
         self.state_store.create_run(thread_id=thread.id, parent_message_id=message.id, channel_id=message.channel.id)
         user_payload = await self._materialize_message_payload(thread.id, message, parsed)
         self.state_store.append_message(thread.id, "user", user_payload)
-        reply = await asyncio.to_thread(self.requirements_agent.build_reply, thread.id)
+        reply = await self._run_blocking(self.requirements_agent.build_reply, thread.id)
         await self._send_channel_text(thread, reply.body)
         self.state_store.append_message(thread.id, "assistant", reply.body)
         self.state_store.update_status(thread.id, reply.status)
@@ -334,7 +339,7 @@ class DevBotClient(discord.Client):
             self._clear_execution_artifacts(thread_id)
         user_payload = await self._materialize_message_payload(thread_id, message, parsed)
         self.state_store.append_message(thread_id, "user", user_payload)
-        reply = await asyncio.to_thread(self.requirements_agent.build_reply, thread_id)
+        reply = await self._run_blocking(self.requirements_agent.build_reply, thread_id)
         await self._send_channel_text(message.channel, reply.body)
         self.state_store.append_message(thread_id, "assistant", reply.body)
         self.state_store.update_status(thread_id, reply.status)
@@ -434,7 +439,7 @@ class DevBotClient(discord.Client):
     async def repos_command(self, interaction: discord.Interaction, query: str | None = None) -> None:
         await interaction.response.defer(thinking=True, ephemeral=True)
         try:
-            repos = await asyncio.to_thread(self._list_repositories_for_display, query or "")
+            repos = await self._run_blocking(self._list_repositories_for_display, query or "")
         except Exception as exc:
             await self._send_followup_text(interaction, f"repository 一覧の取得に失敗しました: `{exc}`", ephemeral=True)
             return
@@ -568,16 +573,18 @@ class DevBotClient(discord.Client):
             await interaction.response.send_message("実行中です。先に `/abort` してください。", ephemeral=True)
             return
         self._clear_execution_artifacts(thread_id)
-        self.state_store.update_meta(
-            self._runtime_key(thread_id),
-            status="requirements_dialogue",
-            issue_number="",
-            pr_number="",
-            pr_url="",
-            workspace="",
-            branch_name="",
-            base_branch="",
-        )
+        runtime_key = self._runtime_key(thread_id)
+        fields: dict[str, Any] = {
+            "status": "requirements_dialogue",
+            "pr_number": "",
+            "pr_url": "",
+            "workspace": "",
+            "branch_name": "",
+            "base_branch": "",
+        }
+        if runtime_key == thread_id:
+            fields["issue_number"] = ""
+        self.state_store.update_meta(runtime_key, **fields)
         await interaction.response.send_message("要件整理を再開しました。修正内容を投稿してください。", ephemeral=True)
 
     async def diff_command(self, interaction: discord.Interaction, pathspec: str | None = None) -> None:
@@ -593,7 +600,7 @@ class DevBotClient(discord.Client):
             await interaction.response.send_message("workspace が見つかりません。", ephemeral=True)
             return
         try:
-            diff_text = await asyncio.to_thread(self._build_diff_summary, workspace, pathspec or "")
+            diff_text = await self._run_blocking(self._build_diff_summary, workspace, pathspec or "")
         except subprocess.CalledProcessError as exc:
             await interaction.response.send_message(f"diff の取得に失敗しました: `{exc}`", ephemeral=True)
             return
@@ -647,7 +654,7 @@ class DevBotClient(discord.Client):
             return [app_commands.Choice(name=repo, value=repo) for repo in cached]
         try:
             repos = await asyncio.wait_for(
-                asyncio.to_thread(self.github_client.suggest_repositories, current, 25),
+                self._run_blocking(self.github_client.suggest_repositories, current, 25),
                 timeout=1.5,
             )
         except Exception as exc:
@@ -658,7 +665,7 @@ class DevBotClient(discord.Client):
 
     async def _warm_repo_autocomplete_cache(self) -> None:
         try:
-            await asyncio.to_thread(self.github_client.warm_repository_cache)
+            await self._run_blocking(self.github_client.warm_repository_cache)
         except Exception as exc:
             logger.warning("repo_autocomplete: cache warm failed: %s", exc)
             return
@@ -679,7 +686,7 @@ class DevBotClient(discord.Client):
 
     async def _scheduler_tick(self) -> None:
         async with self._scheduler_tick_lock:
-            metas = await asyncio.to_thread(self._sync_project_board_state)
+            metas = await self._run_blocking(self._sync_project_board_state)
             for meta in metas:
                 issue_key = str(meta.get("issue_key", "")).strip()
                 thread_id_text = str(meta.get("thread_id", "")).strip()
@@ -782,7 +789,7 @@ class DevBotClient(discord.Client):
         if not self._has_planning_artifacts(thread_id):
             logger.info("scheduler skip: planning artifacts missing for %s", issue_key)
             return
-        gate = await asyncio.to_thread(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
+        gate = await self._run_blocking(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
         if gate.get("state") != expected_state or gate.get("plan") != "Approved":
             return
         issue = self.state_store.load_artifact(issue_key, "issue.json")
@@ -979,7 +986,7 @@ class DevBotClient(discord.Client):
             )
             return
         try:
-            pr_status = await asyncio.to_thread(
+            pr_status = await self._run_blocking(
                 self.github_client.get_pull_request_status,
                 repo_full_name,
                 int(pr["number"]),
@@ -994,7 +1001,7 @@ class DevBotClient(discord.Client):
             await self._mark_merging_blocked(issue_key, thread_id, repo_full_name, issue_number, guard_failure)
             return
         try:
-            result = await asyncio.to_thread(
+            result = await self._run_blocking(
                 self.github_client.merge_pull_request,
                 repo_full_name,
                 int(pr["number"]),
@@ -1018,7 +1025,7 @@ class DevBotClient(discord.Client):
             run_id=str(self.state_store.load_meta(issue_key).get("current_run_id", "")),
             details={"thread_id": thread_id, "pr_number": pr.get("number"), "sha": result.get("sha", "")},
         )
-        await asyncio.to_thread(
+        await self._run_blocking(
             self._update_issue_workpad,
             issue_key,
             repo_full_name,
@@ -1059,7 +1066,7 @@ class DevBotClient(discord.Client):
         self.state_store.update_status(issue_key, "Blocked")
         self.state_store.update_meta(issue_key, runtime_status="")
         try:
-            await asyncio.to_thread(self.github_client.update_issue_state, repo_full_name, issue_number, "Blocked")
+            await self._run_blocking(self.github_client.update_issue_state, repo_full_name, issue_number, "Blocked")
         except Exception as exc:
             logger.warning("merge blocked: failed to update project state for %s: %s", issue_key, exc)
         self.state_store.record_activity(
@@ -1124,7 +1131,7 @@ class DevBotClient(discord.Client):
         self.state_store.update_status(thread_id, "planning")
         self.state_store.write_artifact(thread_id, "planning_progress.json", {"status": "planning", "phase": "plan"})
         try:
-            artifacts = await asyncio.to_thread(self._build_plan_artifacts, repo, thread_id, summary)
+            artifacts = await self._run_blocking(self._build_plan_artifacts, repo, thread_id, summary)
         except Exception as exc:
             details = {"repo": repo}
             stderr: list[str] | None = None
@@ -1243,7 +1250,7 @@ class DevBotClient(discord.Client):
             issue_repo = str(issue_meta.get("github_repo", "")).strip() or repo
             if issue_repo and issue_number:
                 try:
-                    await asyncio.to_thread(self.github_client.update_issue_plan, issue_repo, issue_number, "Drafted")
+                    await self._run_blocking(self.github_client.update_issue_plan, issue_repo, issue_number, "Drafted")
                 except Exception as exc:
                     logger.warning("plan: failed to reset GitHub plan field for %s: %s", issue_key, exc)
                 self.state_store.update_issue_meta(issue_key, plan_state="Drafted")
@@ -1303,13 +1310,13 @@ class DevBotClient(discord.Client):
                 github_client=self.github_client,
                 thread_url=interaction.channel.jump_url if isinstance(interaction.channel, discord.Thread) else "",
             )
-            await asyncio.to_thread(self.github_client.add_issue_to_project, repo_full_name, int(issue["number"]))
+            await self._run_blocking(self.github_client.add_issue_to_project, repo_full_name, int(issue["number"]))
             issue_key = self.state_store.bind_issue(thread_id, repo_full_name, int(issue["number"]))
             promoted_issue_key = issue_key
-            await asyncio.to_thread(
+            await self._run_blocking(
                 self.github_client.update_issue_plan, repo_full_name, int(issue["number"]), "Approved"
             )
-            await asyncio.to_thread(
+            await self._run_blocking(
                 self.github_client.update_issue_state, repo_full_name, int(issue["number"]), "Ready"
             )
             self.state_store.update_draft_meta(thread_id, status="promoted", issue_key=issue_key)
@@ -1357,7 +1364,7 @@ class DevBotClient(discord.Client):
             issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
             if repo_full_name and issue_number:
                 try:
-                    await asyncio.to_thread(
+                    await self._run_blocking(
                         self.github_client.update_issue_plan,
                         repo_full_name,
                         issue_number,
@@ -1450,10 +1457,15 @@ class DevBotClient(discord.Client):
 
     def _clear_execution_artifacts(self, thread_id: int) -> None:
         runtime_key = self._runtime_key(thread_id)
-        for filename in DERIVED_ARTIFACTS:
-            if runtime_key != thread_id:
-                self.state_store.delete_artifact(runtime_key, filename)
-            self.state_store.delete_artifact(thread_id, filename)
+        issue_bound = runtime_key != thread_id
+        runtime_artifacts = DERIVED_ARTIFACTS if not issue_bound else tuple(
+            filename for filename in DERIVED_ARTIFACTS if filename != "issue.json"
+        )
+        for filename in runtime_artifacts:
+            self.state_store.delete_artifact(runtime_key, filename)
+        if issue_bound:
+            for filename in DERIVED_ARTIFACTS:
+                self.state_store.delete_draft_artifact(thread_id, filename)
         if runtime_key != thread_id:
             self.state_store.update_meta(
                 runtime_key,
@@ -1585,7 +1597,7 @@ class DevBotClient(discord.Client):
                 issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
                 if repo_full_name and issue_number:
                     try:
-                        await asyncio.to_thread(
+                        await self._run_blocking(
                             self.github_client.update_issue_state, repo_full_name, issue_number, "Rework"
                         )
                     except Exception as exc:
@@ -1595,7 +1607,7 @@ class DevBotClient(discord.Client):
                 continue
             issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
             if repo_full_name and issue_number:
-                gate = await asyncio.to_thread(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
+                gate = await self._run_blocking(self._scheduler_gate_for_issue, repo_full_name, issue_number, issue_key)
                 if gate.get("state") not in {"Ready", "Rework"} or gate.get("plan") != "Approved":
                     continue
             items.append(

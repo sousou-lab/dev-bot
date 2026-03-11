@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import Any
 
 from app.issue_draft import build_issue_body, build_issue_title
 from app.orchestrator import Orchestrator, WorkItem
 from app.state_store import FileStateStore
+
+
+async def run_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    bound = partial(func, *args, **kwargs)
+    return await asyncio.to_thread(bound)
 
 
 async def ensure_issue_and_enqueue(
@@ -62,7 +68,7 @@ async def ensure_issue_for_thread(
         title = build_issue_title(summary)
         body = build_issue_body(summary, thread_url)
         try:
-            created = await asyncio.to_thread(
+            created = await run_blocking(
                 github_client.create_issue,
                 repo_full_name=repo_full_name,
                 title=title,
