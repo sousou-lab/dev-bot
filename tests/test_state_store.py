@@ -87,3 +87,18 @@ class FileStateStoreTests(unittest.TestCase):
         self.assertEqual("owner/repo#42", meta["issue_key"])
         self.assertEqual("owner/repo", meta["github_repo"])
         self.assertEqual("42", meta["issue_number"])
+
+    def test_bind_issue_promotes_planning_artifacts_to_issue_latest(self) -> None:
+        self.store.write_artifact(1, "requirement_summary.json", {"goal": "ship"})
+        self.store.write_artifact(1, "plan.json", {"steps": ["one"]})
+        self.store.write_artifact(1, "test_plan.json", {"checks": ["tests"]})
+        self.store.append_message(1, "user", "hello")
+
+        issue_key = self.store.bind_issue(1, "owner/repo", 42)
+
+        self.assertEqual({"goal": "ship"}, self.store.load_artifact(issue_key, "requirement_summary.json"))
+        self.assertEqual({"steps": ["one"]}, self.store.load_artifact(issue_key, "plan.json"))
+        self.assertEqual({"checks": ["tests"]}, self.store.load_artifact(issue_key, "test_plan.json"))
+        self.assertEqual({"steps": ["one"]}, self.store.load_artifact(1, "plan.json"))
+        issue_conversation = (self.store.issue_dir(issue_key) / "conversation.jsonl").read_text(encoding="utf-8")
+        self.assertIn("hello", issue_conversation)

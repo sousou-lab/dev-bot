@@ -239,6 +239,7 @@ class FileStateStore:
                 channel_id=int(draft_meta.get("channel_id", 0) or 0),
                 status=str(draft_meta.get("status", "draft")),
             )
+        self._promote_draft_artifacts(thread_id, issue_key)
         self.bind_thread(thread_id, issue_key)
         self.update_draft_meta(
             thread_id,
@@ -364,6 +365,32 @@ class FileStateStore:
         if not path.exists():
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _promote_draft_artifacts(self, thread_id: int, issue_key: str) -> None:
+        draft_dir = self.draft_dir(thread_id)
+        if not draft_dir.exists():
+            return
+
+        for filename in (
+            "requirement_summary.json",
+            "plan.json",
+            "test_plan.json",
+            "planning_progress.json",
+            "issue.json",
+        ):
+            path = draft_dir / filename
+            if not path.exists():
+                continue
+            self._write_json(self.issue_latest_dir(issue_key) / filename, json.loads(path.read_text(encoding="utf-8")))
+
+        for filename in ("conversation.jsonl", "run.log"):
+            source = draft_dir / filename
+            if not source.exists():
+                continue
+            target = self.issue_dir(issue_key) / filename
+            if target.exists():
+                continue
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
 
     def write_attachment_text(self, identifier: str | int, filename: str, content: str) -> str:
         path = self.attachments_dir(identifier) / filename

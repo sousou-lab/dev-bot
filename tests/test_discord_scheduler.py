@@ -233,3 +233,31 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.client._scheduler_tick()
 
         self.assertEqual("Blocked", self.state_store.load_issue_meta(issue_key)["status"])
+
+    async def test_restore_pending_runs_keeps_in_progress_issue_when_process_record_exists(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="In Progress")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="running",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.client.process_registry.register(issue_key, "run-1", pid=1, runner_type="codex")
+
+        await self.client._restore_pending_runs()
+
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("In Progress", meta["status"])
+        self.assertEqual("running", meta["runtime_status"])

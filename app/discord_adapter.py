@@ -1514,8 +1514,7 @@ class DevBotClient(discord.Client):
                 continue
             if str(meta.get("status")) == "In Progress":
                 if self.process_registry.load(issue_key):
-                    await asyncio.to_thread(self.process_registry.terminate, issue_key)
-                    self.process_registry.unregister(issue_key)
+                    continue
                 self.state_store.update_status(issue_key, "Rework")
                 self.state_store.update_meta(issue_key, runtime_status="")
                 continue

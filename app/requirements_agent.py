@@ -257,9 +257,6 @@ class RequirementsAgent:
 
 
 def _conversation_path(runs_root: Path, thread_id: int) -> Path:
-    draft_path = runs_root / "drafts" / str(thread_id) / "conversation.jsonl"
-    if draft_path.exists():
-        return draft_path
     binding_path = runs_root / "bindings" / "discord_threads" / f"{thread_id}.json"
     if binding_path.exists():
         try:
@@ -272,6 +269,9 @@ def _conversation_path(runs_root: Path, thread_id: int) -> Path:
             issue_path = runs_root / "issues" / safe_issue_key / "conversation.jsonl"
             if issue_path.exists():
                 return issue_path
+    draft_path = runs_root / "drafts" / str(thread_id) / "conversation.jsonl"
+    if draft_path.exists():
+        return draft_path
     return runs_root / str(thread_id) / "conversation.jsonl"
 
 
