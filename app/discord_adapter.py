@@ -341,7 +341,7 @@ class DevBotClient(discord.Client):
         if parsed["error"]:
             await self._send_channel_text(message.channel, str(parsed["error"]))
             return
-        if meta.get("status") in {"awaiting_approval"}:
+        if meta.get("status") in {"awaiting_approval", "Blocked", "Cancelled", "Done"}:
             self._clear_execution_artifacts(thread_id)
         user_payload = await self._materialize_message_payload(thread_id, message, parsed)
         self.state_store.append_message(thread_id, "user", user_payload)

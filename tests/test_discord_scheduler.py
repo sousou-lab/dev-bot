@@ -342,6 +342,65 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.state_store.load_artifact(issue_key, "pr.json"),
         )
 
+    async def test_handle_thread_message_clears_execution_artifacts_for_done_thread(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            status="Done",
+            issue_number="42",
+            github_repo="owner/repo",
+            pr_number="99",
+            workspace="/tmp/work",
+            branch_name="agent/gh-42-test",
+            base_branch="main",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Existing issue",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "pr.json",
+            {"number": 99, "url": "https://github.com/owner/repo/pull/99"},
+        )
+
+        async def _parse_message_inputs(_message):
+            return {"error": None}
+
+        async def _materialize_message_payload(_thread_id, _message, _parsed):
+            del _message, _parsed
+            return "new requirement"
+
+        async def _send_channel_text(_channel, _content):
+            del _channel, _content
+            return None
+
+        self.client._parse_message_inputs = _parse_message_inputs  # type: ignore[method-assign]
+        self.client._materialize_message_payload = _materialize_message_payload  # type: ignore[method-assign]
+        self.client._send_channel_text = _send_channel_text  # type: ignore[method-assign]
+        self.client.requirements_agent = MagicMock()
+        self.client.requirements_agent.build_reply.return_value = MagicMock(
+            body="Let's re-scope",
+            status="requirements_dialogue",
+            artifacts={},
+        )
+
+        await self.client._handle_thread_message(_FakeMessage(_FakeThread(thread_id)))
+
+        issue_meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("", issue_meta["pr_number"])
+        self.assertEqual("", issue_meta["workspace"])
+        self.assertEqual({}, self.state_store.load_artifact(issue_key, "pr.json"))
+
     async def test_scheduler_tick_reconciles_orphaned_in_progress_issue_by_issue_key(self) -> None:
         issue_key = "owner/repo#42"
         self.state_store.create_issue_record(issue_key, status="In Progress")
