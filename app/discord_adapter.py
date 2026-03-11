@@ -325,12 +325,17 @@ class DevBotClient(discord.Client):
         meta = self.state_store.load_meta(thread_id)
         runtime_status = str(meta.get("runtime_status", "")).strip()
         has_process = bool(self.process_registry.load(self._runtime_key(thread_id)))
-        if str(meta.get("status", "")) == "planning" or runtime_status in {
-            "queued",
-            "running",
-            "verifying",
-            "awaiting_high_risk_approval",
-        } or (str(meta.get("status", "")).strip() == "In Progress" and has_process):
+        if (
+            str(meta.get("status", "")) == "planning"
+            or runtime_status
+            in {
+                "queued",
+                "running",
+                "verifying",
+                "awaiting_high_risk_approval",
+            }
+            or (str(meta.get("status", "")).strip() == "In Progress" and has_process)
+        ):
             return
         parsed = await self._parse_message_inputs(message)
         if parsed["error"]:
