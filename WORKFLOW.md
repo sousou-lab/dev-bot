@@ -95,6 +95,8 @@ verification:
     - final_summary.json
     - run.log
   required_checks:
+    - name: format
+      command: uv run ruff format --check app/ tests/
     - name: lint
       command: uv run ruff check .
     - name: tests
@@ -150,3 +152,4 @@ Required workflow:
 Verification command policy:
 - Prefer the commands in `verification.required_checks` as the canonical pre-push checks.
 - Run Python-based tooling with `uv run` unless an issue-specific plan explicitly overrides it.
+- When Ruff formatting is part of the repo policy, run `uv run ruff format --check` before push in addition to `ruff check`.

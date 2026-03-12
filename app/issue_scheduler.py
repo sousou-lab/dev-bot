@@ -105,7 +105,9 @@ class IssueScheduler:
                 issue_number = int(str(meta.get("issue_number", "0")).strip() or 0)
                 if repo_full_name and issue_number:
                     try:
-                        await self._run_blocking(self.github_client.update_issue_state, repo_full_name, issue_number, "Rework")
+                        await self._run_blocking(
+                            self.github_client.update_issue_state, repo_full_name, issue_number, "Rework"
+                        )
                     except Exception as exc:
                         logger.warning("restore: failed to update project state for %s: %s", issue_key, exc)
                 continue
