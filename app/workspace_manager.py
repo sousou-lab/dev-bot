@@ -133,7 +133,9 @@ class WorkspaceManager:
         self._run(["git", "-C", workspace, "config", "user.name", "dev-bot"])
         self._run(["git", "-C", workspace, "config", "user.email", "dev-bot@example.local"])
         if not self._workspace_has_head(workspace):
-            self._run(["git", "-C", workspace, "commit", "--allow-empty", "-m", self.EMPTY_REPO_BOOTSTRAP_COMMIT_MESSAGE])
+            self._run(
+                ["git", "-C", workspace, "commit", "--allow-empty", "-m", self.EMPTY_REPO_BOOTSTRAP_COMMIT_MESSAGE]
+            )
         current_branch = self._capture(["git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"]).strip()
         if current_branch != branch_name:
             branches = self._capture(["git", "-C", workspace, "branch", "--list", branch_name]).strip()

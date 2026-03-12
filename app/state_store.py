@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import shutil
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -141,10 +141,14 @@ class FileStateStore:
 
     def debug_artifacts_dir(self, identifier: str | int) -> Path:
         path = (
-            self.issue_latest_dir(self._resolve_entity_key(identifier))
-            if _is_issue_key(self._resolve_entity_key(identifier))
-            else self.entity_dir(identifier)
-        ) / "debug" / "raw"
+            (
+                self.issue_latest_dir(self._resolve_entity_key(identifier))
+                if _is_issue_key(self._resolve_entity_key(identifier))
+                else self.entity_dir(identifier)
+            )
+            / "debug"
+            / "raw"
+        )
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -485,25 +489,25 @@ def _sanitize_payload(value: object) -> object:
 def _json_safe_payload(value: object, path: str = "") -> tuple[object, dict[str, str]]:
     key = path or "$"
     if isinstance(value, dict):
-        items: dict[str, object] = {}
+        dict_items: dict[str, object] = {}
         raw_value_types: dict[str, str] = {}
         for item_key, item in value.items():
             child_value, child_types = _json_safe_payload(item, f"{key}.{item_key}")
-            items[str(item_key)] = child_value
+            dict_items[str(item_key)] = child_value
             raw_value_types.update(child_types)
-        return items, raw_value_types
+        return dict_items, raw_value_types
     if isinstance(value, list):
-        items: list[object] = []
+        list_items: list[object] = []
         raw_value_types: dict[str, str] = {}
         for index, item in enumerate(value):
             child_value, child_types = _json_safe_payload(item, f"{key}[{index}]")
-            items.append(child_value)
+            list_items.append(child_value)
             raw_value_types.update(child_types)
-        return items, raw_value_types
+        return list_items, raw_value_types
     if isinstance(value, tuple):
-        items, raw_value_types = _json_safe_payload(list(value), key)
+        tuple_items, raw_value_types = _json_safe_payload(list(value), key)
         raw_value_types.setdefault(key, "tuple")
-        return items, raw_value_types
+        return tuple_items, raw_value_types
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace"), {key: "bytes"}
     if isinstance(value, str):

@@ -834,7 +834,10 @@ class DevelopmentPipeline:
             check=True,
         )
         bootstrap_base_branch = ""
-        if subprocess.run(["git", "-C", workspace, "rev-parse", "--verify", "main"], capture_output=True).returncode == 0:
+        if (
+            subprocess.run(["git", "-C", workspace, "rev-parse", "--verify", "main"], capture_output=True).returncode
+            == 0
+        ):
             ls_remote = subprocess.run(
                 ["git", "-C", workspace, "ls-remote", "--heads", "origin", "main"],
                 capture_output=True,

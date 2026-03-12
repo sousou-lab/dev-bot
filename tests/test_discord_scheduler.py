@@ -1641,7 +1641,12 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
                     "diagnostics": {},
                 }
             )
-            return SimpleNamespace(repo_profile={"repo": "owner/repo"}, plan={"steps": ["one"]}, test_plan={"checks": []})
+            return SimpleNamespace(
+                repo_profile={"repo": "owner/repo"},
+                plan={"steps": ["one"]},
+                test_plan={"checks": []},
+                verification_plan={"profile": "generic-minimal"},
+            )
 
         self.client.planning_agent.build_artifacts = MagicMock(side_effect=_build_artifacts)
 
@@ -1690,6 +1695,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             return_value={
                 "plan": {"steps": ["one"]},
                 "test_plan": {"checks": ["tests"]},
+                "verification_plan": {"profile": "generic-minimal"},
                 "repo_profile": {"repo": "owner/repo"},
                 "planning_workspace": {"base_branch": "main"},
                 "planning_sessions": {},

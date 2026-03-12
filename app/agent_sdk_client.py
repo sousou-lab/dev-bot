@@ -265,7 +265,9 @@ class ClaudeAgentClient:
                 output_schema=output_schema or {"type": "object"},
                 prompt_kind=prompt_kind,
             )
-            _record_debug_attempt(debug_recorder, result, prompt_kind=prompt_kind, attempt_index=1, context=debug_context)
+            _record_debug_attempt(
+                debug_recorder, result, prompt_kind=prompt_kind, attempt_index=1, context=debug_context
+            )
             self._raise_for_oversized_read(result, prompt_kind=prompt_kind)
         self._raise_for_forbidden_tool(result, prompt_kind=prompt_kind)
         retry_result: AgentResult | None = None
