@@ -215,13 +215,19 @@ class FileStateStore:
         return bool(binding and (self.issue_dir(binding) / "meta.json").exists())
 
     def bind_thread(self, thread_id: int, issue_key: str) -> None:
+        current_issue_key = self.issue_key_for_thread(thread_id)
+        if current_issue_key and current_issue_key != issue_key:
+            raise RuntimeError(f"Thread {thread_id} is already bound to {current_issue_key}")
+        issue_meta = self.load_issue_meta(issue_key)
+        existing_thread_id = str(issue_meta.get("thread_id", "")).strip()
+        if existing_thread_id and existing_thread_id != str(thread_id):
+            raise RuntimeError(f"Issue {issue_key} is already bound to thread {existing_thread_id}")
         payload = {
             "thread_id": str(thread_id),
             "issue_key": issue_key,
             "bound_at": datetime.now(UTC).isoformat(),
         }
         self._write_json(self.bindings_root / f"{thread_id}.json", payload)
-        issue_meta = self.load_issue_meta(issue_key)
         draft_meta = self.load_draft_meta(thread_id)
         if not draft_meta:
             self.create_draft(

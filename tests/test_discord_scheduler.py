@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from app import run_request
@@ -104,7 +105,8 @@ class _FakeThread:
         self.id = thread_id
         self.messages: list[str] = []
 
-    async def send(self, content: str) -> None:
+    async def send(self, content: str, **kwargs: Any) -> None:
+        del kwargs
         self.messages.append(content)
 
 
@@ -236,6 +238,9 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.state_store.write_artifact("owner/repo#42", "plan.json", {"steps": ["replan"]})
+        self.client.github_client = MagicMock()
+        self.client.github_client.update_issue_state.return_value = None
+        self.client.github_client.update_issue_plan.return_value = None
 
         self.client._ensure_managed_thread = lambda channel: 321  # type: ignore[method-assign]
         interaction = _FakeInteraction(_FakeThread(321))
@@ -245,11 +250,14 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         issue_meta = self.state_store.load_issue_meta("owner/repo#42")
         draft_meta = self.state_store.load_draft_meta(321)
         self.assertEqual("42", issue_meta["issue_number"])
-        self.assertEqual("Human Review", issue_meta["status"])
+        self.assertEqual("Backlog", issue_meta["status"])
+        self.assertEqual("Changes Requested", issue_meta["plan_state"])
         self.assertEqual("requirements_dialogue", draft_meta["status"])
         self.assertEqual("", issue_meta["pr_number"])
         self.assertEqual(42, self.state_store.load_artifact("owner/repo#42", "issue.json")["number"])
         self.assertEqual({}, self.state_store.load_artifact("owner/repo#42", "plan.json"))
+        self.client.github_client.update_issue_plan.assert_called_with("owner/repo", 42, "Changes Requested")
+        self.client.github_client.update_issue_state.assert_called_with("owner/repo", 42, "Backlog")
         self.assertEqual(
             [("要件整理を再開しました。修正内容を投稿してください。", True)],
             interaction.response.messages,
@@ -892,6 +900,81 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         meta = self.state_store.load_issue_meta(issue_key)
         self.assertEqual("In Progress", meta["status"])
         self.assertEqual("running", meta["runtime_status"])
+
+    async def test_restore_pending_runs_reposts_pending_approval_for_issue_thread(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="In Progress")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="awaiting_high_risk_approval",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+            },
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "pending_approval.json",
+            {"status": "pending", "tool_name": "Bash", "input_text": "terraform apply", "reason": "high risk"},
+        )
+        thread = _FakeThread(321)
+        self.client.get_channel = lambda channel_id: thread if channel_id == 321 else None  # type: ignore[method-assign]
+
+        await self.client._restore_pending_runs()
+
+        self.assertEqual(1, len(thread.messages))
+        self.assertIn("高リスク操作の承認待ちです", thread.messages[0])
+
+    async def test_scheduler_tick_keeps_in_progress_issue_when_run_is_queued(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="In Progress")
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            plan_state="Approved",
+            runtime_status="queued",
+        )
+        self.state_store.write_artifact(
+            issue_key,
+            "issue.json",
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "url": "https://github.com/owner/repo/issues/42",
+                "state": "OPEN",
+            },
+        )
+        self.client.github_client = MagicMock()
+        self.client.github_client.list_project_issues.return_value = [
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "body": "body",
+                "url": "https://github.com/owner/repo/issues/42",
+                "issue_state": "OPEN",
+                "state": "In Progress",
+                "plan": "Approved",
+            }
+        ]
+        self.client.orchestrator.is_queued = lambda thread_id: thread_id == 321  # type: ignore[method-assign]
+
+        await self.client._scheduler_tick()
+
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("In Progress", meta["status"])
+        self.assertEqual("queued", meta["runtime_status"])
 
     async def test_restore_pending_runs_updates_project_state_when_in_progress_run_is_missing(self) -> None:
         issue_key = "owner/repo#42"

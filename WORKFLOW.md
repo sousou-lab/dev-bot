@@ -95,9 +95,14 @@ verification:
     - final_summary.json
     - run.log
   required_checks:
-    - tests
-    - lint
-    - typecheck
+    - name: format
+      command: uv run ruff format --check app/ tests/
+    - name: lint
+      command: uv run ruff check .
+    - name: tests
+      command: uv run pytest -q
+    - name: typecheck
+      command: uv run pyright app
 
 github:
   auth: app
@@ -126,6 +131,7 @@ Operating rules:
 - Only start a new implementation run unless Project field `Plan` is `Approved` and Project field `State` is one of `Ready` or `Rework`.
 - Treat Project field `State = In Progress` as an already-active run that must be reconciled, not as a signal to start a second run.
 - Treat Project field `State = Merging` as an active post-approval land step owned by the agent.
+- Reserve `thread/resume` for crash recovery of the same `run_id`; do not use it for normal retries.
 - Only modify files inside the current issue workspace.
 - Never push directly to the default branch.
 - Use the repository root `AGENTS.md` and repo-local skills before making substantial changes.
@@ -142,3 +148,8 @@ Required workflow:
 5. Use `$code-change-verification` when code, tests, or build behavior changed.
 6. Use `$draft-pr` once the branch is ready for review.
 7. Update the workpad with branch, PR, verification, and blockers before ending the run.
+
+Verification command policy:
+- Prefer the commands in `verification.required_checks` as the canonical pre-push checks.
+- Run Python-based tooling with `uv run` unless an issue-specific plan explicitly overrides it.
+- When Ruff formatting is part of the repo policy, run `uv run ruff format --check` before push in addition to `ruff check`.

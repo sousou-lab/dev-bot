@@ -102,3 +102,17 @@ class FileStateStoreTests(unittest.TestCase):
         self.assertEqual({"steps": ["one"]}, self.store.load_artifact(1, "plan.json"))
         issue_conversation = (self.store.issue_dir(issue_key) / "conversation.jsonl").read_text(encoding="utf-8")
         self.assertIn("hello", issue_conversation)
+
+    def test_bind_thread_rejects_conflicting_thread_binding(self) -> None:
+        self.store.bind_issue(1, "owner/repo", 42)
+        self.store.create_run(thread_id=2, parent_message_id=11, channel_id=21)
+
+        with self.assertRaises(RuntimeError):
+            self.store.bind_thread(2, "owner/repo#42")
+
+    def test_bind_thread_rejects_rebinding_thread_to_different_issue(self) -> None:
+        self.store.bind_issue(1, "owner/repo", 42)
+        self.store.create_issue_record("owner/repo#99")
+
+        with self.assertRaises(RuntimeError):
+            self.store.bind_thread(1, "owner/repo#99")

@@ -121,7 +121,7 @@ class DevelopmentPipeline:
         workpad_updates_path = artifacts_dir / "workpad_updates.jsonl"
         self._append_run_log(run_log_path, "run start")
 
-        issue_snapshot = await asyncio.to_thread(self._load_issue_snapshot, repo_full_name, issue)
+        issue_snapshot = await self._run_blocking(self._load_issue_snapshot, repo_full_name, issue)
         self.state_store.write_execution_artifact(issue_key, "issue_snapshot.json", issue_snapshot, run_id)
         self.state_store.write_artifact(issue_key, "issue_snapshot.json", issue_snapshot)
 
@@ -135,7 +135,7 @@ class DevelopmentPipeline:
             run_id=run_id,
             details={"repo": repo_full_name, "issue_number": issue.get("number")},
         )
-        await asyncio.to_thread(
+        await self._run_blocking(
             self._update_issue_tracking,
             repo_full_name,
             int(issue["number"]),
@@ -158,7 +158,7 @@ class DevelopmentPipeline:
         )
         await channel.send("run を開始しました。workspace を準備します。")
 
-        workspace_info = await asyncio.to_thread(
+        workspace_info = await self._run_blocking(
             self.workspace_manager.prepare,
             repo_full_name,
             int(issue["number"]),
@@ -203,7 +203,7 @@ class DevelopmentPipeline:
             run_id,
         )
 
-        codex_result = await asyncio.to_thread(
+        codex_result = await self._run_blocking(
             self.codex_runner.run,
             workspace=workspace_info["workspace"],
             run_dir=str(self.state_store.execution_run_dir(issue_key, run_id)),
@@ -324,7 +324,7 @@ class DevelopmentPipeline:
             status="verifying",
             run_id=run_id,
         )
-        verification = await asyncio.to_thread(
+        verification = await self._run_blocking(
             self.claude_runner.verify,
             workspace=workspace_info["workspace"],
             command_results=command_results,
@@ -360,8 +360,8 @@ class DevelopmentPipeline:
             await channel.send("verification が失敗しました。`/status` と `/why-failed` を確認してください。")
             return
 
-        git_diff = await asyncio.to_thread(self._capture_git_diff, workspace_info["workspace"])
-        review = await asyncio.to_thread(
+        git_diff = await self._run_blocking(self._capture_git_diff, workspace_info["workspace"])
+        review = await self._run_blocking(
             self.claude_runner.review,
             workspace=workspace_info["workspace"],
             git_diff=git_diff,
@@ -437,7 +437,7 @@ class DevelopmentPipeline:
             await channel.send("proof-of-work artifact が不足しているため完了できませんでした。")
             return
 
-        pushed = await asyncio.to_thread(
+        pushed = await self._run_blocking(
             self._commit_and_push,
             workspace_info["workspace"],
             workspace_info["branch_name"],
@@ -468,7 +468,7 @@ class DevelopmentPipeline:
         pr_title = f"feat: {issue['title']}"
         channel_url = getattr(channel, "channel_url", getattr(channel, "jump_url", ""))
         pr_body = self._build_pr_body(issue, channel_url, changed_files, command_results, verification, review)
-        pr = await asyncio.to_thread(
+        pr = await self._run_blocking(
             self.github_client.create_pull_request,
             repo_full_name=repo_full_name,
             title=pr_title,
@@ -478,7 +478,7 @@ class DevelopmentPipeline:
             draft=True,
         )
         try:
-            pr_status = await asyncio.to_thread(
+            pr_status = await self._run_blocking(
                 self.github_client.get_pull_request_status,
                 repo_full_name,
                 int(pr["number"]),
@@ -489,7 +489,7 @@ class DevelopmentPipeline:
             head_sha = str(pr_status.get("head_sha", "")).strip()
             if head_sha:
                 pr["head_sha"] = head_sha
-        await asyncio.to_thread(
+        await self._run_blocking(
             self.github_client.ready_pull_request_for_review,
             repo_full_name,
             int(pr["number"]),
@@ -498,7 +498,7 @@ class DevelopmentPipeline:
         self.state_store.write_artifact(issue_key, "pr.json", pr)
         self.state_store.write_execution_artifact(issue_key, "pr.json", pr, run_id)
         comment_body = self._build_pr_comment(channel_url, verification, review, command_results)
-        await asyncio.to_thread(
+        await self._run_blocking(
             self.github_client.create_issue_comment,
             repo_full_name,
             int(pr["number"]),
@@ -532,7 +532,7 @@ class DevelopmentPipeline:
             run_id=run_id,
             details={"pr_number": pr["number"], "pr_url": pr["url"]},
         )
-        await asyncio.to_thread(
+        await self._run_blocking(
             self._update_issue_tracking,
             repo_full_name,
             int(issue["number"]),
@@ -633,42 +633,72 @@ class DevelopmentPipeline:
         run_id: str,
     ) -> dict[str, Any]:
         del client, issue_key, run_id
-        commands = workflow.get("commands", {})
         results: list[dict[str, Any]] = []
+        for phase, command in self._workflow_commands(workflow):
+            if is_high_risk_command(command):
+                await channel.send(
+                    "禁止または高リスクの workflow command を検出したため停止します。\n"
+                    f"- phase: `{phase}`\n"
+                    f"- command: `{command}`"
+                )
+                return {
+                    "results": results,
+                    "failure_type": "policy_violation",
+                    "stopped_before_command": command,
+                }
+            completed = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                cwd=workspace,
+                shell=True,
+                text=True,
+                capture_output=True,
+            )
+            results.append(
+                {
+                    "phase": phase,
+                    "command": command,
+                    "returncode": completed.returncode,
+                    "output": (completed.stdout + completed.stderr)[-4000:],
+                    "success": completed.returncode == 0,
+                }
+            )
+        return {"results": results}
+
+    def _workflow_commands(self, workflow: dict[str, Any]) -> list[tuple[str, str]]:
+        verification = workflow.get("verification", {})
+        if isinstance(verification, dict):
+            checks = verification.get("required_checks", [])
+            if isinstance(checks, list):
+                normalized_checks = self._normalize_required_checks(checks)
+                if normalized_checks:
+                    return normalized_checks
+        commands = workflow.get("commands", {})
+        if not isinstance(commands, dict):
+            return []
+        normalized: list[tuple[str, str]] = []
         for phase in ("setup", "lint", "test"):
-            phase_commands = commands.get(phase, []) if isinstance(commands, dict) else []
+            phase_commands = commands.get(phase, [])
             if not isinstance(phase_commands, list):
                 continue
-            for command in phase_commands:
-                if is_high_risk_command(command):
-                    await channel.send(
-                        "禁止または高リスクの workflow command を検出したため停止します。\n"
-                        f"- phase: `{phase}`\n"
-                        f"- command: `{command}`"
-                    )
-                    return {
-                        "results": results,
-                        "failure_type": "policy_violation",
-                        "stopped_before_command": command,
-                    }
-                completed = await asyncio.to_thread(
-                    subprocess.run,
-                    command,
-                    cwd=workspace,
-                    shell=True,
-                    text=True,
-                    capture_output=True,
-                )
-                results.append(
-                    {
-                        "phase": phase,
-                        "command": command,
-                        "returncode": completed.returncode,
-                        "output": (completed.stdout + completed.stderr)[-4000:],
-                        "success": completed.returncode == 0,
-                    }
-                )
-        return {"results": results}
+            normalized.extend((phase, str(command)) for command in phase_commands if str(command).strip())
+        return normalized
+
+    def _normalize_required_checks(self, checks: list[Any]) -> list[tuple[str, str]]:
+        normalized: list[tuple[str, str]] = []
+        for item in checks:
+            if isinstance(item, dict):
+                command = str(item.get("command", "")).strip()
+                if not command:
+                    continue
+                name = str(item.get("name", "")).strip() or "check"
+                normalized.append((name, command))
+                continue
+            if isinstance(item, str) and item.strip():
+                # String-only checks are accepted for backwards compatibility but do not
+                # provide an executable command. Keep runtime behavior explicit.
+                continue
+        return normalized
 
     def _detect_changed_files(self, workspace: str) -> list[str]:
         output = subprocess.check_output(["git", "-C", workspace, "status", "--porcelain"], text=True)

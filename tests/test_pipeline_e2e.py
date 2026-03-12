@@ -107,6 +107,11 @@ class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
             approval_coordinator=self.approval_coordinator,
         )
 
+        async def _run_blocking(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        self.pipeline._run_blocking = _run_blocking  # type: ignore[method-assign]
+
         self.adapter = InMemoryAdapter()
         self.adapter.register_channel(THREAD_ID)
 
@@ -121,14 +126,14 @@ class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
         return patch.object(
             self.pipeline.workspace_manager,
             "prepare",
-            return_value=_make_workspace_info(self.workspace_dir),
+            side_effect=lambda *args, **kwargs: _make_workspace_info(self.workspace_dir),
         )
 
     def _patch_codex(self, returncode: int = 0) -> Any:
         return patch.object(
             self.pipeline.codex_runner,
             "run",
-            return_value=_make_codex_result(
+            side_effect=lambda *args, **kwargs: _make_codex_result(
                 returncode=returncode,
                 stdout_path=str(self.codex_log_path),
             ),
@@ -138,24 +143,25 @@ class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
         return patch.object(
             self.pipeline.claude_runner,
             "verify",
-            return_value=_make_verification(status),
+            side_effect=lambda *args, **kwargs: _make_verification(status),
         )
 
     def _patch_review(self, decision: str = "approve") -> Any:
         return patch.object(
             self.pipeline.claude_runner,
             "review",
-            return_value=_make_review(decision),
+            side_effect=lambda *args, **kwargs: _make_review(decision),
         )
 
     def _patch_git_diff(self, diff: str = "diff --git a/file.py b/file.py") -> Any:
-        return patch.object(self.pipeline, "_capture_git_diff", return_value=diff)
+        return patch.object(self.pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: diff)
 
     def _patch_commit_push(self, pushed: bool = True) -> Any:
-        return patch.object(self.pipeline, "_commit_and_push", return_value=pushed)
+        return patch.object(self.pipeline, "_commit_and_push", side_effect=lambda *args, **kwargs: pushed)
 
     def _patch_detect_changed(self, files: list[str] | None = None) -> Any:
-        return patch.object(self.pipeline, "_detect_changed_files", return_value=files or ["file.py"])
+        resolved = files or ["file.py"]
+        return patch.object(self.pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: resolved)
 
     def _patch_workflow(self, workflow: dict[str, Any] | None = None) -> Any:
         return patch("app.pipeline.load_workflow", return_value=workflow or {"commands": {}})
@@ -165,6 +171,23 @@ class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
 
 
 class TestFullSuccessPath(PipelineE2EBase):
+    def test_workflow_commands_use_verification_required_checks(self) -> None:
+        commands = self.pipeline._workflow_commands(
+            {
+                "verification": {
+                    "required_checks": [
+                        {"name": "lint", "command": "ruff check ."},
+                        {"name": "tests", "command": "pytest -q"},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(
+            [("lint", "ruff check ."), ("tests", "pytest -q")],
+            commands,
+        )
+
     async def test_full_success_path_creates_pr(self) -> None:
         with (
             self._patch_workspace(),

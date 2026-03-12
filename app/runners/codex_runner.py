@@ -185,6 +185,8 @@ class CodexRunner:
                         },
                     },
                 )
+                # Normal retries always create a fresh run/thread boundary. `thread/resume`
+                # is reserved for crash recovery of the same run and is not used here.
                 thread_response = self._wait_for_response(process.stdout, log_fh, thread_id)
                 server_thread_id = self._extract_thread_id(thread_response)
 

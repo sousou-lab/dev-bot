@@ -66,6 +66,8 @@
    - Discord 上の要件対話は draft として保存し、approve 後に issue work item へ昇格させる。
 12. retry は resume ではなく新しい試行として扱う
    - 同一 issue の再実行では新しい `run_id` を切り、履歴を混ぜない。
+13. `thread/resume` は crash recovery 専用とする
+   - 通常の `Rework` や人間起点の再実行では使わず、同一 `run_id` の異常終了復旧に限定する。
 
 ## State And Plan Semantics
 ### Execution Gate
@@ -144,6 +146,8 @@
 
 ### Runtime Rules
 - retry は同一 issue に対する新しい試行であり、毎回新しい `run_id` を発行する
+- `thread/resume` は同一 `run_id` の crash recovery にだけ使う
+- `Rework` や差し戻し後の再実行では `thread/resume` を使わず、新しい run を開始する
 - abort は current run を停止し、通常は issue を `Blocked` に遷移させる
 - restore は run 再開ではなく state 整合処理として扱う
 - `In Progress` で process 不在なら `Rework` に落とす
