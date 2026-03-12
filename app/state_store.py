@@ -222,11 +222,17 @@ class FileStateStore:
         }
         self._write_json(self.bindings_root / f"{thread_id}.json", payload)
         issue_meta = self.load_issue_meta(issue_key)
+        draft_meta = self.load_draft_meta(thread_id)
+        if not draft_meta:
+            self.create_draft(
+                thread_id,
+                parent_message_id=int(issue_meta.get("parent_message_id", 0) or 0),
+                channel_id=int(issue_meta.get("channel_id", 0) or 0),
+                status=str(issue_meta.get("status", "collecting_requirements") or "collecting_requirements"),
+            )
         if issue_meta:
             self.update_issue_meta(issue_key, thread_id=str(thread_id))
-        draft_meta = self.load_draft_meta(thread_id)
-        if draft_meta:
-            self.update_draft_meta(thread_id, issue_key=issue_key)
+        self.update_draft_meta(thread_id, issue_key=issue_key)
 
     def bind_issue(self, thread_id: int, repo_full_name: str, issue_number: int) -> str:
         issue_key = f"{repo_full_name}#{issue_number}"

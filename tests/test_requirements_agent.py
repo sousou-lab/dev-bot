@@ -45,6 +45,75 @@ class RequirementsAgentNormalizationTests(unittest.TestCase):
         self.assertEqual(["feature x"], payload["summary"]["in_scope"])
         self.assertEqual(["a", "b"], payload["summary"]["constraints"])
 
+    def test_normalize_payload_populates_extended_summary_defaults(self) -> None:
+        payload = self.agent._normalize_payload({"status": "questioning", "reply": "ok", "summary": {}})
+
+        self.assertEqual("simple", payload["summary"]["complexity"])
+        self.assertEqual("", payload["summary"]["recommended_direction"])
+        self.assertEqual([], payload["summary"]["solution_options"])
+        self.assertEqual([], payload["summary"]["decision_hints"])
+        self.assertEqual(
+            {
+                "priority_preference": "unknown",
+                "change_scope_preference": "unknown",
+                "compatibility_preference": "unknown",
+                "risk_tolerance": "unknown",
+                "delivery_expectation": "unknown",
+            },
+            payload["summary"]["preferences"],
+        )
+
+    def test_normalize_payload_filters_invalid_extended_summary_values(self) -> None:
+        payload = self.agent._normalize_payload(
+            {
+                "status": "ready_for_confirmation",
+                "reply": "done",
+                "summary": {
+                    "complexity": "invalid",
+                    "preferred_outcomes": "fast rollout",
+                    "tradeoffs": ["keep API", ""],
+                    "preferences": {
+                        "priority_preference": "speed",
+                        "change_scope_preference": "bad-value",
+                    },
+                    "decision_hints": [
+                        {
+                            "question": "priority",
+                            "selected_label": "fast",
+                            "normalized_key": "priority_preference",
+                            "normalized_value": "speed",
+                            "source": "user_selection",
+                        },
+                        {
+                            "question": "bad",
+                            "selected_label": "bad",
+                            "normalized_key": "missing",
+                            "normalized_value": "nope",
+                            "source": "other",
+                        },
+                    ],
+                    "solution_options": [
+                        {
+                            "name": "Option A",
+                            "summary": "Smallest change",
+                            "pros": "low risk",
+                            "cons": ["future debt", ""],
+                        },
+                        {"name": "", "summary": "", "pros": [], "cons": []},
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual("simple", payload["summary"]["complexity"])
+        self.assertEqual(["fast rollout"], payload["summary"]["preferred_outcomes"])
+        self.assertEqual(["keep API"], payload["summary"]["tradeoffs"])
+        self.assertEqual("speed", payload["summary"]["preferences"]["priority_preference"])
+        self.assertEqual("unknown", payload["summary"]["preferences"]["change_scope_preference"])
+        self.assertEqual(1, len(payload["summary"]["decision_hints"]))
+        self.assertEqual(1, len(payload["summary"]["solution_options"]))
+        self.assertEqual(["low risk"], payload["summary"]["solution_options"][0]["pros"])
+
     def test_load_messages_reads_issue_bound_conversation(self) -> None:
         binding_dir = Path(self.tempdir.name) / "bindings" / "discord_threads"
         binding_dir.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from app import run_request
@@ -184,6 +185,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("91234", self.state_store.thread_id_for_issue("owner/repo#42"))
         self.assertEqual(1, len(self.status_channel.created_threads))
+        self.assertEqual("owner/repo#42", self.state_store.load_draft_meta(91234)["issue_key"])
 
     async def test_scheduler_tick_does_not_dispatch_from_local_cache_when_project_sync_fails(self) -> None:
         issue_key = "owner/repo#42"
@@ -290,6 +292,55 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("Human Review", self.state_store.load_issue_meta(issue_key)["status"])
         self.assertEqual("requirements_dialogue", self.state_store.load_draft_meta(thread_id)["status"])
+
+    async def test_handle_thread_message_blocks_when_bound_thread_is_in_local_planning_state(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            status="Human Review",
+            issue_number="42",
+            github_repo="owner/repo",
+        )
+        self.state_store.update_draft_meta(thread_id, status="planning")
+        called = {"parse": False}
+
+        async def _parse_message_inputs(_message):
+            called["parse"] = True
+            return {"error": None}
+
+        self.client._parse_message_inputs = _parse_message_inputs  # type: ignore[method-assign]
+
+        await self.client._handle_thread_message(_FakeMessage(_FakeThread(thread_id)))
+
+        self.assertFalse(called["parse"])
+
+    async def test_handle_thread_message_blocks_when_issue_is_ready_even_if_draft_is_promoted(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=10, channel_id=20)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            status="Ready",
+            plan_state="Approved",
+            issue_number="42",
+            github_repo="owner/repo",
+        )
+        self.state_store.update_draft_meta(thread_id, status="promoted")
+        called = {"parse": False}
+
+        async def _parse_message_inputs(_message):
+            called["parse"] = True
+            return {"error": None}
+
+        self.client._parse_message_inputs = _parse_message_inputs  # type: ignore[method-assign]
+
+        await self.client._handle_thread_message(_FakeMessage(_FakeThread(thread_id)))
+
+        self.assertFalse(called["parse"])
 
     async def test_status_command_prefers_dialogue_state_for_issue_bound_thread_ui(self) -> None:
         thread_id = 321
@@ -1123,7 +1174,12 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
         self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
         self.state_store.bind_issue(thread_id, "owner/repo", 42)
-        self.state_store.update_issue_meta("owner/repo#42", github_repo="owner/repo", issue_number="42")
+        self.state_store.update_issue_meta(
+            "owner/repo#42",
+            github_repo="owner/repo",
+            issue_number="42",
+            status="Human Review",
+        )
         self.client.github_client = MagicMock()
         self.client._build_plan_artifacts = MagicMock(
             return_value={
@@ -1156,6 +1212,87 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.client._generate_plan(interaction, "owner/repo", alias_used=False)
 
         self.client.github_client.update_issue_plan.assert_called_with("owner/repo", 42, "Drafted")
+        self.assertEqual("Human Review", self.state_store.load_issue_meta("owner/repo#42")["status"])
+        self.assertEqual("awaiting_approval", self.state_store.load_draft_meta(thread_id)["status"])
+
+    async def test_generate_plan_does_not_advance_local_state_when_remote_plan_reset_fails(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            "owner/repo#42",
+            github_repo="owner/repo",
+            issue_number="42",
+            status="Human Review",
+            plan_state="Approved",
+        )
+        self.client.github_client = MagicMock()
+        self.client.github_client.update_issue_plan.side_effect = RuntimeError("plan sync failed")
+        self.client._build_plan_artifacts = MagicMock(
+            return_value={
+                "plan": {"steps": ["one"]},
+                "test_plan": {"checks": ["tests"]},
+                "repo_profile": {"repo": "owner/repo"},
+                "planning_workspace": {"base_branch": "main"},
+                "planning_sessions": {},
+            }
+        )
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+        class _Chan(_FakeThread):
+            def __init__(self, channel_id: int) -> None:
+                super().__init__(channel_id)
+
+        interaction = MagicMock()
+        interaction.channel = _Chan(thread_id)
+        interaction.response = _Resp()
+        sent: list[str] = []
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, ephemeral
+            sent.append(content)
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+
+        await self.client._generate_plan(interaction, "owner/repo", alias_used=False)
+
+        self.assertEqual("Approved", self.state_store.load_issue_meta("owner/repo#42")["plan_state"])
+        self.assertEqual("failed", self.state_store.load_draft_meta(thread_id)["status"])
+        self.assertTrue(sent)
+
+    async def test_build_plan_artifacts_progress_keeps_canonical_issue_state_for_bound_thread(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(
+            issue_key,
+            github_repo="owner/repo",
+            issue_number="42",
+            status="Human Review",
+        )
+        self.state_store.update_draft_meta(thread_id, status="planning")
+        self.client.pipeline.workspace_manager.prepare_plan_workspace = MagicMock(
+            return_value={"workspace": self.tmpdir.name, "base_branch": "main"}
+        )
+        self.client.planning_agent.build_artifacts = MagicMock(
+            side_effect=lambda **kwargs: (
+                kwargs["progress_callback"]({"status": "test_plan_generating", "phase": "overview"}),
+                SimpleNamespace(repo_profile={"repo": "owner/repo"}, plan={"steps": ["one"]}, test_plan={"checks": []}),
+            )[1]
+        )
+
+        result = self.client._build_plan_artifacts("owner/repo", thread_id, {"goal": "ship"})
+
+        self.assertEqual("Human Review", self.state_store.load_issue_meta(issue_key)["status"])
+        self.assertEqual("planning", self.state_store.load_draft_meta(thread_id)["status"])
+        self.assertEqual("test_plan_generating", self.state_store.load_artifact(thread_id, "planning_progress.json")["status"])
+        self.assertEqual({"steps": ["one"]}, result["plan"])
 
     async def test_promote_approved_plan_adds_new_issue_to_project_before_updating_fields(self) -> None:
         thread_id = 321
