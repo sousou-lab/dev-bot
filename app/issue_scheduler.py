@@ -154,9 +154,15 @@ class IssueScheduler:
             issue_meta = self.state_store.load_issue_meta(issue_key)
             if not issue_meta:
                 self.state_store.create_issue_record(issue_key, status=state or "Backlog")
+                issue_meta = self.state_store.load_issue_meta(issue_key)
+            resolved_state = self._resolve_synced_state(
+                issue_key=issue_key,
+                project_state=state,
+                issue_meta=issue_meta,
+            )
             self.state_store.update_issue_meta(
                 issue_key,
-                status=state or str(self.state_store.load_issue_meta(issue_key).get("status", "")),
+                status=resolved_state,
                 plan_state=plan,
                 github_repo=repo_full_name,
                 issue_number=str(issue_number),
@@ -174,6 +180,25 @@ class IssueScheduler:
                 },
             )
         return [self.state_store.load_issue_meta(issue_key) for issue_key in synced_issue_keys]
+
+    def _resolve_synced_state(self, *, issue_key: str, project_state: str, issue_meta: dict[str, Any]) -> str:
+        local_state = str(issue_meta.get("status", "")).strip()
+        synced_state = project_state or local_state
+        if synced_state != "In Progress" or local_state != "Rework":
+            return synced_state
+
+        thread_id = int(str(issue_meta.get("thread_id", "")).strip() or 0)
+        has_process = self.process_registry.is_active(issue_key) or (
+            thread_id > 0 and self.process_registry.is_active(thread_id)
+        )
+        is_active = has_process or (thread_id > 0 and self.orchestrator.is_running(thread_id)) or (
+            thread_id > 0 and self.orchestrator.is_queued(thread_id)
+        )
+        if is_active:
+            return synced_state
+
+        logger.info("scheduler sync: keeping local Rework for %s because remote In Progress looks stale", issue_key)
+        return local_state
 
     def scheduler_gate_for_issue(self, repo_full_name: str, issue_number: int, issue_key: str) -> dict[str, str]:
         try:

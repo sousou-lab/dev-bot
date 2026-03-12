@@ -56,7 +56,7 @@ hooks:
   timeout_ms: 60000
 
 agent:
-  max_concurrent_agents: 3
+  max_concurrent_agents: 7
   max_turns: 20
   max_stalled_ms: 300000
   plan_required: true

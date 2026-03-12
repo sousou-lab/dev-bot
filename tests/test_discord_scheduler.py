@@ -71,6 +71,55 @@ class DiscordSchedulerTests(unittest.TestCase):
 
         self.assertEqual(["owner/repo#42"], [meta["issue_key"] for meta in metas])
 
+    def test_sync_project_board_state_keeps_local_rework_when_remote_in_progress_is_stale(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Rework")
+        self.state_store.update_issue_meta(issue_key, runtime_status="", plan_state="Approved")
+        self.client.github_client = MagicMock()
+        self.client.github_client.list_project_issues.return_value = [
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "body": "body",
+                "url": "https://github.com/owner/repo/issues/42",
+                "issue_state": "OPEN",
+                "state": "In Progress",
+                "plan": "Approved",
+            }
+        ]
+
+        metas = self.client._sync_project_board_state()
+
+        self.assertEqual(1, len(metas))
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("Rework", meta["status"])
+
+    def test_sync_project_board_state_accepts_remote_in_progress_when_process_is_active(self) -> None:
+        issue_key = "owner/repo#42"
+        self.state_store.create_issue_record(issue_key, thread_id=321, status="Rework")
+        self.state_store.update_issue_meta(issue_key, runtime_status="running", plan_state="Approved")
+        self.client.process_registry.register(issue_key, "run-1", pid=1, runner_type="codex")
+        self.client.github_client = MagicMock()
+        self.client.github_client.list_project_issues.return_value = [
+            {
+                "repo_full_name": "owner/repo",
+                "number": 42,
+                "title": "Ship scheduler",
+                "body": "body",
+                "url": "https://github.com/owner/repo/issues/42",
+                "issue_state": "OPEN",
+                "state": "In Progress",
+                "plan": "Approved",
+            }
+        ]
+
+        metas = self.client._sync_project_board_state()
+
+        self.assertEqual(1, len(metas))
+        meta = self.state_store.load_issue_meta(issue_key)
+        self.assertEqual("In Progress", meta["status"])
+
     def test_clear_execution_artifacts_keeps_issue_number_for_issue_bound_thread(self) -> None:
         self.state_store.create_run(thread_id=1, parent_message_id=10, channel_id=20)
         self.state_store.bind_issue(1, "owner/repo", 42)
