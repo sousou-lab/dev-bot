@@ -191,8 +191,10 @@ class IssueScheduler:
         has_process = self.process_registry.is_active(issue_key) or (
             thread_id > 0 and self.process_registry.is_active(thread_id)
         )
-        is_active = has_process or (thread_id > 0 and self.orchestrator.is_running(thread_id)) or (
-            thread_id > 0 and self.orchestrator.is_queued(thread_id)
+        is_active = (
+            has_process
+            or (thread_id > 0 and self.orchestrator.is_running(thread_id))
+            or (thread_id > 0 and self.orchestrator.is_queued(thread_id))
         )
         if is_active:
             return synced_state
