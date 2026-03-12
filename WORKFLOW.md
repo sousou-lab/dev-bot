@@ -96,11 +96,11 @@ verification:
     - run.log
   required_checks:
     - name: lint
-      command: ruff check .
+      command: uv run ruff check .
     - name: tests
-      command: pytest -q
+      command: uv run pytest -q
     - name: typecheck
-      command: python -m py_compile app/*.py
+      command: uv run pyright app
 
 github:
   auth: app
@@ -146,3 +146,7 @@ Required workflow:
 5. Use `$code-change-verification` when code, tests, or build behavior changed.
 6. Use `$draft-pr` once the branch is ready for review.
 7. Update the workpad with branch, PR, verification, and blockers before ending the run.
+
+Verification command policy:
+- Prefer the commands in `verification.required_checks` as the canonical pre-push checks.
+- Run Python-based tooling with `uv run` unless an issue-specific plan explicitly overrides it.

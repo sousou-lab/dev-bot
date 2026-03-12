@@ -25,6 +25,7 @@
 ## Build And Test Expectations
 - Prefer repository-defined commands from `plan.json`, `test_plan.json`, and repo profiler output.
 - If commands disagree, prefer explicit repository policy over heuristics.
+- Python-based formatter, linter, type-check, and test commands should be executed with `uv run` unless the repository policy explicitly says otherwise.
 - Before pushing, run the applicable formatter/linter checks and fix any reported issues.
 - Do not mark work complete until verification artifacts are updated.
 
