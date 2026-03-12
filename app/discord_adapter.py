@@ -1330,7 +1330,9 @@ class DevBotClient(discord.Client):
                     message="Issue metadata is incomplete; cannot sync Plan field to GitHub.",
                     details={"issue_key": issue_key, "repo": repo, "base_branch": base_branch},
                 )
-                self.state_store.update_draft_meta(thread_id, status="failed", github_repo=repo, base_branch=base_branch)
+                self.state_store.update_draft_meta(
+                    thread_id, status="failed", github_repo=repo, base_branch=base_branch
+                )
                 await self._send_followup_text(
                     interaction,
                     "plan は生成しましたが、既存 Issue の GitHub metadata が不足しているため成功扱いにしていません。",
@@ -1352,7 +1354,9 @@ class DevBotClient(discord.Client):
                         "target_plan_state": "Drafted",
                     },
                 )
-                self.state_store.update_draft_meta(thread_id, status="failed", github_repo=repo, base_branch=base_branch)
+                self.state_store.update_draft_meta(
+                    thread_id, status="failed", github_repo=repo, base_branch=base_branch
+                )
                 await self._send_followup_text(
                     interaction,
                     f"plan は生成しましたが GitHub の Plan を `Drafted` に戻せなかったため成功扱いにしていません: `{exc}`",

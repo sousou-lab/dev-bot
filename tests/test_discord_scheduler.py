@@ -1291,7 +1291,9 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("Human Review", self.state_store.load_issue_meta(issue_key)["status"])
         self.assertEqual("planning", self.state_store.load_draft_meta(thread_id)["status"])
-        self.assertEqual("test_plan_generating", self.state_store.load_artifact(thread_id, "planning_progress.json")["status"])
+        self.assertEqual(
+            "test_plan_generating", self.state_store.load_artifact(thread_id, "planning_progress.json")["status"]
+        )
         self.assertEqual({"steps": ["one"]}, result["plan"])
 
     async def test_promote_approved_plan_adds_new_issue_to_project_before_updating_fields(self) -> None:
