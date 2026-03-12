@@ -170,6 +170,8 @@ class ClaudeAgentClientTests(unittest.TestCase):
         )
         self.assertIn("planning エージェント", PLAN_SYSTEM_PROMPT)
         self.assertIn("plan.json というファイルを保存しない", PLAN_SYSTEM_PROMPT)
+        self.assertIn("recommended_direction は高レベルな方向づけ", PLAN_SYSTEM_PROMPT)
+        self.assertIn("repo の実態調査より優先してはいけない", PLAN_SYSTEM_PROMPT)
         self.assertIn("test planning エージェント", TEST_PLAN_SYSTEM_PROMPT)
         self.assertIn("test_plan.json というファイルを保存しない", TEST_PLAN_SYSTEM_PROMPT)
 
