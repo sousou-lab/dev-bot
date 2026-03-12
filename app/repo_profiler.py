@@ -186,7 +186,9 @@ def _unique(values: list[str]) -> list[str]:
     return result
 
 
-def _suggest_verification_profile(*, languages: list[str], files: list[str], package_json: bool, pyproject: bool) -> str:
+def _suggest_verification_profile(
+    *, languages: list[str], files: list[str], package_json: bool, pyproject: bool
+) -> str:
     language_set = set(languages)
     if "html" in language_set and not package_json and not pyproject:
         return "static-web"

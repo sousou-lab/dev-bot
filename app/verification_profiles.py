@@ -74,7 +74,9 @@ def _select_scope(plan: dict[str, Any]) -> list[str]:
     return sorted(top_dirs)
 
 
-def _build_checks(profile: str, repo_profile: dict[str, Any], scope_paths: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _build_checks(
+    profile: str, repo_profile: dict[str, Any], scope_paths: list[str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if profile == "static-web":
         return _static_web_checks(scope_paths)
     if profile == "generic-minimal":
@@ -115,9 +117,12 @@ def _commands_for_scope(commands: Any, scope_paths: list[str]) -> list[str]:
         if not command:
             continue
         path = scope_paths[0]
-        if command.startswith("npm "):
-            scoped.append(f"cd {path} && {command}")
-        elif command.startswith("uv run ") or command.startswith("pytest ") or command.startswith("python "):
+        if (
+            command.startswith("npm ")
+            or command.startswith("uv run ")
+            or command.startswith("pytest ")
+            or command.startswith("python ")
+        ):
             scoped.append(f"cd {path} && {command}")
         else:
             scoped.append(f"cd {path} && {command}")
@@ -130,21 +135,21 @@ def _static_web_checks(scope_paths: list[str]) -> tuple[list[dict[str, Any]], li
         {
             "name": "html_static_smoke",
             "command": (
-                "python -c \"from pathlib import Path; "
+                'python -c "from pathlib import Path; '
                 f"root=Path(r'{target}'); "
                 "html=sorted(root.rglob('*.html')); "
                 "assert html, 'no html files found'; "
                 "text=html[0].read_text(encoding='utf-8', errors='replace'); "
                 "assert '<html' in text.lower(), 'missing html root'; "
                 "assert '<script' in text.lower() or '.js' in text.lower(), 'missing interactive script'; "
-                "print(html[0])\""
+                'print(html[0])"'
             ),
             "allow_not_applicable": False,
         },
         {
             "name": "xss_static_scan",
             "command": (
-                "python -c \"from pathlib import Path; "
+                'python -c "from pathlib import Path; '
                 f"root=Path(r'{target}'); "
                 "files=list(root.rglob('*.html'))+list(root.rglob('*.js')); "
                 "assert files, 'no html/js files found'; "
@@ -164,12 +169,12 @@ def _generic_minimal_checks(scope_paths: list[str]) -> tuple[list[dict[str, Any]
         {
             "name": "workspace_sanity",
             "command": (
-                "python -c \"from pathlib import Path; "
+                'python -c "from pathlib import Path; '
                 f"root=Path(r'{target}'); "
                 "assert root.exists(), 'scope does not exist'; "
                 "files=[p for p in root.rglob('*') if p.is_file()]; "
                 "assert files, 'no files found in scope'; "
-                "print(len(files))\""
+                'print(len(files))"'
             ),
             "allow_not_applicable": False,
         }

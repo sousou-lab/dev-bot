@@ -363,7 +363,9 @@ class DevelopmentPipeline:
                 verification=verification_json,
                 extra={},
             )
-            await channel.send("verification の hard check が失敗しました。`/status` と `/why-failed` を確認してください。")
+            await channel.send(
+                "verification の hard check が失敗しました。`/status` と `/why-failed` を確認してください。"
+            )
             return
         if verification.get("status") not in {"success", "passed", "completed"}:
             await self._finalize_failure(
@@ -780,9 +782,13 @@ class DevelopmentPipeline:
     ) -> dict[str, Any]:
         status = "pass" if returncode == 0 else "fail"
         lowered = output.lower()
-        if returncode != 0 and allow_not_applicable and any(
-            marker in lowered
-            for marker in ("no tests ran", "no tests collected", "not found", "no such file or directory")
+        if (
+            returncode != 0
+            and allow_not_applicable
+            and any(
+                marker in lowered
+                for marker in ("no tests ran", "no tests collected", "not found", "no such file or directory")
+            )
         ):
             status = "not_applicable"
         return {

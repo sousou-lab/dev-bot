@@ -355,7 +355,9 @@ class TestCodexFailure(unittest.TestCase):
                 patch.object(
                     pipeline.codex_runner,
                     "run",
-                    side_effect=lambda *args, **kwargs: _make_codex_result(returncode=1, stdout_path=str(codex_log_path)),
+                    side_effect=lambda *args, **kwargs: _make_codex_result(
+                        returncode=1, stdout_path=str(codex_log_path)
+                    ),
                 ),
                 patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
                 patch("app.pipeline.load_workflow", return_value={"commands": {}}),
@@ -386,7 +388,7 @@ class TestVerificationGating(unittest.TestCase):
             )
             workflow = {
                 "verification": {
-                    "required_checks": [{"name": "lint", "command": "python -c \"import sys; sys.exit(1)\""}],
+                    "required_checks": [{"name": "lint", "command": 'python -c "import sys; sys.exit(1)"'}],
                 }
             }
             with (
@@ -398,12 +400,16 @@ class TestVerificationGating(unittest.TestCase):
                 patch.object(
                     pipeline.codex_runner,
                     "run",
-                    side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path)),
+                    side_effect=lambda *args, **kwargs: _make_codex_result(
+                        returncode=0, stdout_path=str(codex_log_path)
+                    ),
                 ),
                 patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
                 patch("app.pipeline.load_workflow", return_value=workflow),
                 patch("app.pipeline.workflow_text", return_value="workflow text"),
-                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification("success")),
+                patch.object(
+                    pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification("success")
+                ),
             ):
                 await pipeline.execute_run(
                     chat=adapter,
@@ -478,14 +484,20 @@ class TestVerificationPlanFallback(unittest.TestCase):
                 patch.object(
                     pipeline.codex_runner,
                     "run",
-                    side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path)),
+                    side_effect=lambda *args, **kwargs: _make_codex_result(
+                        returncode=0, stdout_path=str(codex_log_path)
+                    ),
                 ),
                 patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
                 patch("app.pipeline.load_workflow", return_value={}),
                 patch("app.pipeline.workflow_text", return_value="workflow text"),
-                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()),
+                patch.object(
+                    pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()
+                ),
                 patch.object(pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: _make_review()),
-                patch.object(pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"),
+                patch.object(
+                    pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"
+                ),
                 patch.object(pipeline, "_commit_and_push", side_effect=lambda *args, **kwargs: True),
             ):
                 await pipeline.execute_run(
@@ -514,14 +526,28 @@ class TestVerificationFailure(unittest.TestCase):
                 state_dir=tmpdir.name,
             )
             with (
-                patch.object(pipeline.workspace_manager, "prepare", side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir)),
-                patch.object(pipeline.codex_runner, "run", side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path))),
+                patch.object(
+                    pipeline.workspace_manager,
+                    "prepare",
+                    side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir),
+                ),
+                patch.object(
+                    pipeline.codex_runner,
+                    "run",
+                    side_effect=lambda *args, **kwargs: _make_codex_result(
+                        returncode=0, stdout_path=str(codex_log_path)
+                    ),
+                ),
                 patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
                 patch("app.pipeline.load_workflow", return_value={"commands": {}}),
                 patch("app.pipeline.workflow_text", return_value="workflow text"),
-                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification("failed")),
+                patch.object(
+                    pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification("failed")
+                ),
             ):
-                await pipeline.execute_run(chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue())
+                await pipeline.execute_run(
+                    chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue()
+                )
             return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
 
         messages, meta = asyncio.run(run_case())
@@ -534,18 +560,38 @@ class TestReviewReject(unittest.TestCase):
         async def run_case() -> tuple[list[str], dict[str, Any]]:
             tmpdir = tempfile.TemporaryDirectory()
             workspace_dir = tempfile.mkdtemp()
-            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(workspace_dir=workspace_dir, state_dir=tmpdir.name)
+            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(
+                workspace_dir=workspace_dir, state_dir=tmpdir.name
+            )
             with (
-                patch.object(pipeline.workspace_manager, "prepare", side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir)),
-                patch.object(pipeline.codex_runner, "run", side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path))),
+                patch.object(
+                    pipeline.workspace_manager,
+                    "prepare",
+                    side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir),
+                ),
+                patch.object(
+                    pipeline.codex_runner,
+                    "run",
+                    side_effect=lambda *args, **kwargs: _make_codex_result(
+                        returncode=0, stdout_path=str(codex_log_path)
+                    ),
+                ),
                 patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
                 patch("app.pipeline.load_workflow", return_value={"commands": {}}),
                 patch("app.pipeline.workflow_text", return_value="workflow text"),
-                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()),
-                patch.object(pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: _make_review("reject")),
-                patch.object(pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"),
+                patch.object(
+                    pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()
+                ),
+                patch.object(
+                    pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: _make_review("reject")
+                ),
+                patch.object(
+                    pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"
+                ),
             ):
-                await pipeline.execute_run(chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue())
+                await pipeline.execute_run(
+                    chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue()
+                )
             return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
 
         messages, meta = asyncio.run(run_case())
@@ -558,19 +604,37 @@ class TestNoChanges(unittest.TestCase):
         async def run_case() -> tuple[list[str], dict[str, Any]]:
             tmpdir = tempfile.TemporaryDirectory()
             workspace_dir = tempfile.mkdtemp()
-            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(workspace_dir=workspace_dir, state_dir=tmpdir.name)
+            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(
+                workspace_dir=workspace_dir, state_dir=tmpdir.name
+            )
             with (
-                patch.object(pipeline.workspace_manager, "prepare", side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir)),
-                patch.object(pipeline.codex_runner, "run", side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path))),
+                patch.object(
+                    pipeline.workspace_manager,
+                    "prepare",
+                    side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir),
+                ),
+                patch.object(
+                    pipeline.codex_runner,
+                    "run",
+                    side_effect=lambda *args, **kwargs: _make_codex_result(
+                        returncode=0, stdout_path=str(codex_log_path)
+                    ),
+                ),
                 patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
                 patch("app.pipeline.load_workflow", return_value={"commands": {}}),
                 patch("app.pipeline.workflow_text", return_value="workflow text"),
-                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()),
+                patch.object(
+                    pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()
+                ),
                 patch.object(pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: _make_review()),
-                patch.object(pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"),
+                patch.object(
+                    pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"
+                ),
                 patch.object(pipeline, "_commit_and_push", side_effect=lambda *args, **kwargs: False),
             ):
-                await pipeline.execute_run(chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue())
+                await pipeline.execute_run(
+                    chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue()
+                )
             return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
 
         messages, meta = asyncio.run(run_case())

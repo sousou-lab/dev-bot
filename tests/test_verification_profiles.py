@@ -11,7 +11,9 @@ from app.verification_profiles import build_verification_plan, workflow_verifica
 class VerificationProfileTests(unittest.TestCase):
     def test_repo_profiler_suggests_static_web_for_html_only_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            Path(tmpdir, "index.html").write_text("<!doctype html><html><body><script></script></body></html>", encoding="utf-8")
+            Path(tmpdir, "index.html").write_text(
+                "<!doctype html><html><body><script></script></body></html>", encoding="utf-8"
+            )
 
             profile = build_repo_profile(tmpdir)
 
@@ -34,7 +36,9 @@ class VerificationProfileTests(unittest.TestCase):
 
         self.assertEqual("static-web", verification_plan["profile"])
         self.assertEqual(["."], verification_plan["scope"]["paths"])
-        self.assertEqual(["html_static_smoke", "xss_static_scan"], [item["name"] for item in verification_plan["hard_checks"]])
+        self.assertEqual(
+            ["html_static_smoke", "xss_static_scan"], [item["name"] for item in verification_plan["hard_checks"]]
+        )
 
     def test_workflow_verification_from_plan_emits_hard_and_advisory_checks(self) -> None:
         verification = workflow_verification_from_plan(
