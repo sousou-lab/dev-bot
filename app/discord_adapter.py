@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import traceback
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -1204,6 +1205,13 @@ class DevBotClient(discord.Client):
                 if exc.diagnostics:
                     details.update(exc.diagnostics)
                 stderr = exc.stderr
+            traceback_path = self.state_store.write_debug_text_artifact(
+                thread_id, "plan_generation_traceback.txt", traceback.format_exc()
+            )
+            debug_artifacts = self.state_store.list_debug_artifacts(thread_id)
+            if debug_artifacts:
+                details["debug_artifacts"] = debug_artifacts
+            details["traceback_artifact"] = traceback_path
             self.state_store.record_failure(
                 thread_id,
                 stage="plan_generation",
@@ -1297,6 +1305,7 @@ class DevBotClient(discord.Client):
                 github_repo=repo,
                 base_branch=base_branch,
             )
+        self.state_store.clear_debug_artifacts(thread_id)
         self.state_store.write_artifact(thread_id, "planning_progress.json", {"status": "completed", "phase": "done"})
         prefix = "互換コマンド `/confirm` を `/plan` として扱いました。\n\n" if alias_used else ""
         plan_message = prefix + self._format_plan_message(repo, artifacts["plan"], artifacts["test_plan"])
@@ -1436,6 +1445,7 @@ class DevBotClient(discord.Client):
         planning_workspace = self.pipeline.workspace_manager.prepare_plan_workspace(repo, thread_id)
         repo_profile = build_repo_profile(planning_workspace["workspace"])
         progress_state: dict[str, Any] = {"session_ids": []}
+        self.state_store.clear_debug_artifacts(thread_id)
 
         def report_progress(payload: dict[str, Any]) -> None:
             normalized_payload = _json_safe_value(payload)
@@ -1453,11 +1463,23 @@ class DevBotClient(discord.Client):
             if status and not self.state_store.issue_key_for_thread(thread_id):
                 self.state_store.update_status(thread_id, status)
 
+        def record_debug(payload: dict[str, Any]) -> None:
+            phase = str(payload.get("phase", "unknown")).strip() or "unknown"
+            attempt_index = int(payload.get("attempt_index", 0))
+            filename = f"{payload.get('prompt_kind', 'unknown')}_{phase}"
+            if phase == "acceptance_criterion":
+                phase_index = int(payload.get("phase_index", 0))
+                if phase_index > 0:
+                    filename = f"{filename}_ac_{phase_index:02d}"
+            filename = f"{filename}_attempt_{attempt_index}_response.json"
+            self.state_store.write_debug_artifact(thread_id, filename, payload)
+
         built = self.planning_agent.build_artifacts(
             workspace=planning_workspace["workspace"],
             summary=summary,
             repo_profile=repo_profile,
             progress_callback=report_progress,
+            debug_recorder=record_debug,
         )
         return {
             "repo_profile": built.repo_profile,

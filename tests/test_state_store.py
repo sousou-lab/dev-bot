@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from pathlib import Path
 
 from app.state_store import FileStateStore
 
@@ -77,6 +79,28 @@ class FileStateStoreTests(unittest.TestCase):
         history = self.store.load_artifact(1, "activity_history.json")
         self.assertEqual(1, len(history["items"]))
         self.assertEqual("workspace", history["items"][0]["phase"])
+
+    def test_write_debug_artifact_normalizes_bytes_and_tracks_raw_types(self) -> None:
+        path = self.store.write_debug_artifact(
+            1,
+            "response.json",
+            {
+                "session_id": b"sess_bytes",
+                "structured_output": {"payload": (b"chunk",)},
+            },
+        )
+
+        saved = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.assertEqual("sess_bytes", saved["session_id"])
+        self.assertEqual(["chunk"], saved["structured_output"]["payload"])
+        self.assertEqual("bytes", saved["raw_value_types"]["$.session_id"])
+
+    def test_clear_debug_artifacts_removes_raw_directory(self) -> None:
+        self.store.write_debug_artifact(1, "response.json", {"ok": True})
+
+        self.store.clear_debug_artifacts(1)
+
+        self.assertEqual([], self.store.list_debug_artifacts(1))
 
     def test_bind_issue_persists_issue_key(self) -> None:
         issue_key = self.store.bind_issue(1, "owner/repo", 42)

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -191,6 +192,8 @@ class ClaudeAgentClient:
         agents: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         prompt_kind: str | None = None,
+        debug_recorder: Any | None = None,
+        debug_context: dict[str, Any] | None = None,
     ) -> dict:
         return self.json_response_with_meta(
             system,
@@ -204,6 +207,8 @@ class ClaudeAgentClient:
             agents=agents,
             output_schema=output_schema,
             prompt_kind=prompt_kind,
+            debug_recorder=debug_recorder,
+            debug_context=debug_context,
         ).payload
 
     def json_response_with_meta(
@@ -219,6 +224,8 @@ class ClaudeAgentClient:
         agents: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         prompt_kind: str | None = None,
+        debug_recorder: Any | None = None,
+        debug_context: dict[str, Any] | None = None,
     ) -> AgentJsonEnvelope:
         result = self.run_text(
             system=system,
@@ -233,6 +240,7 @@ class ClaudeAgentClient:
             output_schema=output_schema or {"type": "object"},
             prompt_kind=prompt_kind,
         )
+        _record_debug_attempt(debug_recorder, result, prompt_kind=prompt_kind, attempt_index=0, context=debug_context)
         prefetched_stderr: list[str] = []
         self._raise_for_oversized_read(result, prompt_kind=prompt_kind)
         forbidden_tool = _extract_forbidden_tool_attempt(result.stderr or [])
@@ -257,6 +265,7 @@ class ClaudeAgentClient:
                 output_schema=output_schema or {"type": "object"},
                 prompt_kind=prompt_kind,
             )
+            _record_debug_attempt(debug_recorder, result, prompt_kind=prompt_kind, attempt_index=1, context=debug_context)
             self._raise_for_oversized_read(result, prompt_kind=prompt_kind)
         self._raise_for_forbidden_tool(result, prompt_kind=prompt_kind)
         retry_result: AgentResult | None = None
@@ -281,6 +290,9 @@ class ClaudeAgentClient:
                 agents=agents,
                 output_schema=None,
                 prompt_kind=prompt_kind,
+            )
+            _record_debug_attempt(
+                debug_recorder, retry_result, prompt_kind=prompt_kind, attempt_index=1, context=debug_context
             )
             self._raise_for_oversized_read(retry_result, prompt_kind=prompt_kind)
             self._raise_for_forbidden_tool(retry_result, prompt_kind=prompt_kind)
@@ -346,6 +358,9 @@ class ClaudeAgentClient:
                 agents=agents,
                 output_schema=None,
                 prompt_kind=prompt_kind,
+            )
+            _record_debug_attempt(
+                debug_recorder, retry_result, prompt_kind=prompt_kind, attempt_index=1, context=debug_context
             )
             self._raise_for_oversized_read(retry_result, prompt_kind=prompt_kind)
             self._raise_for_forbidden_tool(retry_result, prompt_kind=prompt_kind)
@@ -866,6 +881,31 @@ def _build_response_diagnostics(
         "api_error_class": api_error_class,
         "api_error_message": api_error_message,
     }
+
+
+def _record_debug_attempt(
+    debug_recorder: Any | None,
+    attempt: AgentResult,
+    *,
+    prompt_kind: str | None,
+    attempt_index: int,
+    context: dict[str, Any] | None,
+) -> None:
+    if debug_recorder is None:
+        return
+    payload = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "prompt_kind": prompt_kind or "unknown",
+        "attempt_index": attempt_index,
+        "session_id": attempt.session_id,
+        "result_text": attempt.result,
+        "structured_output": attempt.structured_output,
+        "stderr": list(attempt.stderr or []),
+        "diagnostics": dict(attempt.diagnostics or {}),
+    }
+    if context:
+        payload.update(context)
+    debug_recorder(payload)
 
 
 def _extract_api_error_details(stderr_lines: list[str]) -> tuple[str, str]:

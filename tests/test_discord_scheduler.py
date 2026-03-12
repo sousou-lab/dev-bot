@@ -1611,6 +1611,100 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual({"steps": ["one"]}, result["plan"])
 
+    async def test_build_plan_artifacts_replaces_stale_debug_artifacts_with_latest_response(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_debug_artifact(thread_id, "stale.json", {"old": True})
+        self.client.pipeline.workspace_manager.prepare_plan_workspace = MagicMock(
+            return_value={"workspace": self.tmpdir.name, "base_branch": "main"}
+        )
+
+        def _build_artifacts(**kwargs: Any) -> SimpleNamespace:
+            kwargs["debug_recorder"](
+                {
+                    "prompt_kind": "test_plan",
+                    "phase": "overview",
+                    "attempt_index": 0,
+                    "session_id": b"sess_bytes",
+                    "result_text": '{"ok":true}',
+                    "structured_output": {"ok": True},
+                    "stderr": [],
+                    "diagnostics": {},
+                }
+            )
+            return SimpleNamespace(repo_profile={"repo": "owner/repo"}, plan={"steps": ["one"]}, test_plan={"checks": []})
+
+        self.client.planning_agent.build_artifacts = MagicMock(side_effect=_build_artifacts)
+
+        self.client._build_plan_artifacts("owner/repo", thread_id, {"goal": "ship"})
+
+        debug_artifacts = self.state_store.list_debug_artifacts(thread_id)
+        self.assertEqual(1, len(debug_artifacts))
+        self.assertTrue(debug_artifacts[0].endswith("test_plan_overview_attempt_0_response.json"))
+        payload = json.loads(Path(debug_artifacts[0]).read_text(encoding="utf-8"))
+        self.assertEqual("sess_bytes", payload["session_id"])
+
+    async def test_generate_plan_failure_records_debug_artifacts_and_traceback(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        debug_path = self.state_store.write_debug_artifact(thread_id, "plan_attempt_0_response.json", {"ok": False})
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+        interaction = MagicMock()
+        interaction.channel = _FakeThread(thread_id)
+        interaction.response = _Resp()
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, content, ephemeral
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+        self.client._build_plan_artifacts = MagicMock(side_effect=RuntimeError("boom"))
+
+        await self.client._generate_plan(interaction, "owner/repo", alias_used=False)
+
+        failure = self.state_store.load_artifact(thread_id, "last_failure.json")
+        self.assertIn(debug_path, failure["details"]["debug_artifacts"])
+        self.assertTrue(str(failure["details"]["traceback_artifact"]).endswith("plan_generation_traceback.txt"))
+        self.assertTrue(Path(failure["details"]["traceback_artifact"]).exists())
+
+    async def test_generate_plan_success_clears_debug_artifacts(self) -> None:
+        thread_id = 321
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.write_artifact(thread_id, "requirement_summary.json", {"goal": "ship"})
+        self.state_store.write_debug_artifact(thread_id, "plan_attempt_0_response.json", {"ok": False})
+        self.client._build_plan_artifacts = MagicMock(
+            return_value={
+                "plan": {"steps": ["one"]},
+                "test_plan": {"checks": ["tests"]},
+                "repo_profile": {"repo": "owner/repo"},
+                "planning_workspace": {"base_branch": "main"},
+                "planning_sessions": {},
+            }
+        )
+
+        class _Resp:
+            async def defer(self, thinking: bool = False) -> None:
+                del thinking
+
+        interaction = MagicMock()
+        interaction.channel = _FakeThread(thread_id)
+        interaction.response = _Resp()
+        self.client._ensure_managed_thread = lambda channel: thread_id  # type: ignore[method-assign]
+
+        async def _send_followup_text(_interaction, content: str, *, ephemeral: bool = False) -> None:
+            del _interaction, content, ephemeral
+
+        self.client._send_followup_text = _send_followup_text  # type: ignore[method-assign]
+
+        await self.client._generate_plan(interaction, "owner/repo", alias_used=False)
+
+        self.assertEqual([], self.state_store.list_debug_artifacts(thread_id))
+
     async def test_promote_approved_plan_adds_new_issue_to_project_before_updating_fields(self) -> None:
         thread_id = 321
         self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)

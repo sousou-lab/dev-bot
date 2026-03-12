@@ -275,6 +275,7 @@ class PlanningAgent:
         summary: dict[str, Any],
         repo_profile: dict[str, Any],
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        debug_recorder: Callable[[dict[str, Any]], None] | None = None,
     ) -> PlanningArtifacts:
         if not self._has_plannable_summary(summary):
             raise ValueError(
@@ -307,6 +308,8 @@ class PlanningAgent:
             setting_sources=[],
             output_schema=PLAN_SCHEMA,
             prompt_kind="plan",
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "plan"},
         )
         test_plan = self._build_test_plan(
             client=test_plan_client,
@@ -316,6 +319,7 @@ class PlanningAgent:
             repo_context=_build_test_plan_repo_context(workspace, repo_profile),
             plan=plan,
             progress_callback=progress_callback,
+            debug_recorder=debug_recorder,
         )
         return PlanningArtifacts(repo_profile=repo_profile, plan=plan, test_plan=test_plan)
 
@@ -341,6 +345,7 @@ class PlanningAgent:
         repo_context: str,
         plan: dict[str, Any],
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        debug_recorder: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         common_prompt = (
             "以下の要件サマリーとリポジトリ情報を見て判断してください。\n\n"
@@ -373,6 +378,8 @@ class PlanningAgent:
             setting_sources=[],
             output_schema=TEST_PLAN_OVERVIEW_SCHEMA,
             prompt_kind="test_plan",
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "overview"},
         )
         overview = overview_result.payload
         acceptance_items = [str(item).strip() for item in summary.get("acceptance_criteria", []) if str(item).strip()]
@@ -418,6 +425,12 @@ class PlanningAgent:
                 setting_sources=[],
                 output_schema=TEST_PLAN_AC_SCHEMA,
                 prompt_kind="test_plan",
+                debug_recorder=debug_recorder,
+                debug_context={
+                    "phase": "acceptance_criterion",
+                    "phase_index": index,
+                    "phase_label": acceptance,
+                },
             )
             case_chunks.append(partial_result.payload)
             if progress_callback is not None:

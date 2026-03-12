@@ -8,6 +8,9 @@ from app.github_client import GitHubIssueClient
 
 
 class WorkspaceManager:
+    EMPTY_REPO_BOOTSTRAP_BRANCH = "main"
+    EMPTY_REPO_BOOTSTRAP_COMMIT_MESSAGE = "chore: bootstrap repository"
+
     def __init__(self, settings: Settings, github_client: GitHubIssueClient | None = None) -> None:
         self.settings = settings
         self.root = Path(settings.workspace_root).expanduser()
@@ -38,9 +41,31 @@ class WorkspaceManager:
             self._run(["git", "--git-dir", str(mirror), "remote", "set-url", "origin", self._clone_url(repo_full_name)])
             self._run(["git", "--git-dir", str(mirror), "fetch", "origin", "--prune"])
 
+        branch_name = f"agent/gh-{issue_number}-{issue_slug}"
+        if not self._has_any_ref(git_dir=str(mirror)):
+            workspace_info = self._prepare_empty_repo_workspace(
+                repo_full_name=repo_full_name,
+                workspace=str(workspace),
+                branch_name=branch_name,
+            )
+            resolved_run_root = Path(run_root) if run_root else workspace_root / "latest-run"
+            resolved_run_root.mkdir(parents=True, exist_ok=True)
+            return {
+                "workspace_key": workspace_key,
+                "workspace": str(workspace),
+                "workspace_root": str(workspace_root),
+                "mirror": str(mirror),
+                "branch_name": branch_name,
+                "base_branch": self.EMPTY_REPO_BOOTSTRAP_BRANCH,
+                "run_root": str(resolved_run_root),
+                "artifacts_dir": str(resolved_run_root / "artifacts"),
+                "bootstrap_base_branch": self.EMPTY_REPO_BOOTSTRAP_BRANCH,
+                "is_empty_repo": True,
+                **workspace_info,
+            }
+
         head_branch = self._resolve_default_branch(repo_full_name, git_dir=str(mirror))
         mirror_base_ref = self._resolve_mirror_base_ref(str(mirror), head_branch)
-        branch_name = f"agent/gh-{issue_number}-{issue_slug}"
 
         if not workspace.exists():
             self._run(["git", "--git-dir", str(mirror), "worktree", "add", str(workspace), mirror_base_ref])
@@ -69,6 +94,8 @@ class WorkspaceManager:
             "base_branch": head_branch,
             "run_root": str(resolved_run_root),
             "artifacts_dir": str(resolved_run_root / "artifacts"),
+            "bootstrap_base_branch": "",
+            "is_empty_repo": False,
         }
 
     def prepare_plan_workspace(
@@ -88,8 +115,33 @@ class WorkspaceManager:
             "run_root": str(run_root),
         }
 
-    def push_branch(self, workspace: str, branch_name: str) -> None:
+    def push_branch(self, workspace: str, branch_name: str, bootstrap_base_branch: str = "") -> None:
+        if bootstrap_base_branch:
+            self._run(["git", "-C", workspace, "push", "-u", "origin", bootstrap_base_branch])
         self._run(["git", "-C", workspace, "push", "-u", "origin", branch_name])
+
+    def _prepare_empty_repo_workspace(self, *, repo_full_name: str, workspace: str, branch_name: str) -> dict:
+        workspace_path = Path(workspace)
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        git_dir = workspace_path / ".git"
+        if not git_dir.exists():
+            self._run(["git", "init", "-b", self.EMPTY_REPO_BOOTSTRAP_BRANCH, workspace])
+        if self._workspace_has_remote(workspace, "origin"):
+            self._run(["git", "-C", workspace, "remote", "set-url", "origin", self._clone_url(repo_full_name)])
+        else:
+            self._run(["git", "-C", workspace, "remote", "add", "origin", self._clone_url(repo_full_name)])
+        self._run(["git", "-C", workspace, "config", "user.name", "dev-bot"])
+        self._run(["git", "-C", workspace, "config", "user.email", "dev-bot@example.local"])
+        if not self._workspace_has_head(workspace):
+            self._run(["git", "-C", workspace, "commit", "--allow-empty", "-m", self.EMPTY_REPO_BOOTSTRAP_COMMIT_MESSAGE])
+        current_branch = self._capture(["git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+        if current_branch != branch_name:
+            branches = self._capture(["git", "-C", workspace, "branch", "--list", branch_name]).strip()
+            if branches:
+                self._run(["git", "-C", workspace, "checkout", branch_name])
+            else:
+                self._run(["git", "-C", workspace, "checkout", "-B", branch_name, self.EMPTY_REPO_BOOTSTRAP_BRANCH])
+        return {}
 
     def _prepare_root(
         self,
@@ -202,6 +254,23 @@ class WorkspaceManager:
         except subprocess.CalledProcessError:
             return False
         return True
+
+    def _has_any_ref(self, *, git_dir: str | None = None, workspace: str | None = None) -> bool:
+        return bool(self._list_heads(git_dir=git_dir, workspace=workspace))
+
+    def _workspace_has_head(self, workspace: str) -> bool:
+        try:
+            self._capture(["git", "-C", workspace, "rev-parse", "--verify", "HEAD"])
+        except subprocess.CalledProcessError:
+            return False
+        return True
+
+    def _workspace_has_remote(self, workspace: str, remote_name: str) -> bool:
+        try:
+            output = self._capture(["git", "-C", workspace, "remote"])
+        except subprocess.CalledProcessError:
+            return False
+        return remote_name in {line.strip() for line in output.splitlines() if line.strip()}
 
     def _list_heads(self, *, git_dir: str | None = None, workspace: str | None = None) -> list[str]:
         cmd = ["git"]

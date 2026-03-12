@@ -104,6 +104,13 @@ def format_why_failed_message(
                     lines.append(f"- acceptance_criterion: {acceptance}")
                 if last_session_id:
                     lines.append(f"- planning_session: `{last_session_id}`")
+            debug_artifacts = details.get("debug_artifacts")
+            if isinstance(debug_artifacts, list) and debug_artifacts:
+                lines.append(f"- debug_artifacts: `{len(debug_artifacts)}` files")
+                lines.append(f"- latest_debug_artifact: `{debug_artifacts[-1]}`")
+            traceback_artifact = str(details.get("traceback_artifact", "")).strip()
+            if traceback_artifact:
+                lines.append(f"- traceback_artifact: `{traceback_artifact}`")
         stderr_lines = last_failure.get("stderr")
         if isinstance(stderr_lines, list):
             for item in stderr_lines[-3:]:

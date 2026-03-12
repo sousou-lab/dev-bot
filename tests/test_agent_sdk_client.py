@@ -103,6 +103,24 @@ class ClaudeAgentClientTests(unittest.TestCase):
         self.assertEqual("ToolSearch", ctx.exception.tool_name)
         self.assertIn("disabled during planning", ctx.exception.reason)
 
+    def test_json_response_with_meta_records_debug_attempts(self) -> None:
+        client = StubClaudeAgentClient([AgentResult(result='{"goal":"ok"}', session_id=b"sess_bytes")])
+        debug_events: list[dict[str, object]] = []
+
+        client.json_response_with_meta(
+            "system",
+            "prompt",
+            prompt_kind="plan",
+            debug_recorder=debug_events.append,
+            debug_context={"phase": "plan"},
+        )
+
+        self.assertEqual(1, len(debug_events))
+        self.assertEqual("plan", debug_events[0]["prompt_kind"])
+        self.assertEqual("plan", debug_events[0]["phase"])
+        self.assertEqual(0, debug_events[0]["attempt_index"])
+        self.assertEqual(b"sess_bytes", debug_events[0]["session_id"])
+
     def test_json_response_retry_prompt_is_planning_specific(self) -> None:
         client = StubClaudeAgentClient(
             [

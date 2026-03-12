@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -135,6 +136,15 @@ class FileStateStore:
 
     def attachments_dir(self, identifier: str | int) -> Path:
         path = self.entity_dir(identifier) / "attachments"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def debug_artifacts_dir(self, identifier: str | int) -> Path:
+        path = (
+            self.issue_latest_dir(self._resolve_entity_key(identifier))
+            if _is_issue_key(self._resolve_entity_key(identifier))
+            else self.entity_dir(identifier)
+        ) / "debug" / "raw"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -327,6 +337,30 @@ class FileStateStore:
             self.append_log(identifier, json.dumps(payload["details"], ensure_ascii=False))
         return payload
 
+    def write_debug_artifact(self, identifier: str | int, filename: str, payload: object) -> str:
+        safe_payload, raw_value_types = _json_safe_payload(payload)
+        if isinstance(safe_payload, dict) and raw_value_types:
+            safe_payload = dict(safe_payload)
+            safe_payload.setdefault("raw_value_types", raw_value_types)
+        path = self.debug_artifacts_dir(identifier) / filename
+        self._write_json(path, safe_payload)
+        return str(path)
+
+    def write_debug_text_artifact(self, identifier: str | int, filename: str, content: str) -> str:
+        path = self.debug_artifacts_dir(identifier) / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_sanitize_for_log(content), encoding="utf-8")
+        return str(path)
+
+    def list_debug_artifacts(self, identifier: str | int) -> list[str]:
+        debug_dir = self.debug_artifacts_dir(identifier)
+        return [str(path) for path in sorted(debug_dir.rglob("*")) if path.is_file()]
+
+    def clear_debug_artifacts(self, identifier: str | int) -> None:
+        debug_dir = self.debug_artifacts_dir(identifier)
+        if debug_dir.exists():
+            shutil.rmtree(debug_dir)
+
     def delete_artifact(self, identifier: str | int, filename: str) -> None:
         entity_key = self._resolve_entity_key(identifier)
         target_dir = self.issue_latest_dir(entity_key) if _is_issue_key(entity_key) else self.entity_dir(entity_key)
@@ -443,13 +477,39 @@ class FileStateStore:
 
 
 def _sanitize_payload(value: object) -> object:
+    safe_value, _raw_value_types = _json_safe_payload(value)
+    return safe_value
+
+
+def _json_safe_payload(value: object, path: str = "") -> tuple[object, dict[str, str]]:
+    key = path or "$"
     if isinstance(value, dict):
-        return {key: _sanitize_payload(item) for key, item in value.items()}
+        items: dict[str, object] = {}
+        raw_value_types: dict[str, str] = {}
+        for item_key, item in value.items():
+            child_value, child_types = _json_safe_payload(item, f"{key}.{item_key}")
+            items[str(item_key)] = child_value
+            raw_value_types.update(child_types)
+        return items, raw_value_types
     if isinstance(value, list):
-        return [_sanitize_payload(item) for item in value]
+        items: list[object] = []
+        raw_value_types: dict[str, str] = {}
+        for index, item in enumerate(value):
+            child_value, child_types = _json_safe_payload(item, f"{key}[{index}]")
+            items.append(child_value)
+            raw_value_types.update(child_types)
+        return items, raw_value_types
+    if isinstance(value, tuple):
+        items, raw_value_types = _json_safe_payload(list(value), key)
+        raw_value_types.setdefault(key, "tuple")
+        return items, raw_value_types
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace"), {key: "bytes"}
     if isinstance(value, str):
-        return _sanitize_for_log(value)
-    return value
+        return _sanitize_for_log(value), {}
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, {}
+    return _sanitize_for_log(repr(value)), {key: type(value).__name__}
 
 
 def _sanitize_for_log(text: str) -> str:

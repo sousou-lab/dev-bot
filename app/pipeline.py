@@ -721,7 +721,17 @@ class DevelopmentPipeline:
             ["git", "-C", workspace, "commit", "-m", f"feat: automated changes for issue #{issue_number}"],
             check=True,
         )
-        self.workspace_manager.push_branch(workspace, branch_name)
+        bootstrap_base_branch = ""
+        if subprocess.run(["git", "-C", workspace, "rev-parse", "--verify", "main"], capture_output=True).returncode == 0:
+            ls_remote = subprocess.run(
+                ["git", "-C", workspace, "ls-remote", "--heads", "origin", "main"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if not ls_remote.stdout.strip():
+                bootstrap_base_branch = "main"
+        self.workspace_manager.push_branch(workspace, branch_name, bootstrap_base_branch=bootstrap_base_branch)
         return True
 
     def _build_pr_body(
