@@ -397,6 +397,7 @@ class FileStateStore:
             "requirement_summary.json",
             "plan.json",
             "test_plan.json",
+            "verification_plan.json",
             "planning_progress.json",
             "issue.json",
         ):

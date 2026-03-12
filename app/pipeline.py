@@ -17,6 +17,7 @@ from app.proof_of_work import evaluate_proof_of_work
 from app.runners.claude_runner import ClaudeRunner
 from app.runners.codex_runner import CodexRunner
 from app.state_store import FileStateStore
+from app.verification_profiles import workflow_verification_from_plan
 from app.workflow_loader import load_workflow, workflow_text
 from app.workspace_manager import WorkspaceManager
 
@@ -104,8 +105,11 @@ class DevelopmentPipeline:
         summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
         plan = self.state_store.load_artifact(thread_id, "plan.json")
         test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
+        verification_plan = self.state_store.load_artifact(thread_id, "verification_plan.json")
         if not isinstance(summary, dict) or not isinstance(plan, dict) or not isinstance(test_plan, dict):
             raise RuntimeError("Missing planning artifacts before run.")
+        if not isinstance(verification_plan, dict):
+            verification_plan = {}
 
         issue_key = f"{repo_full_name}#{int(issue['number'])}"
         run_id = self.state_store.create_execution_run(issue_key)
@@ -151,7 +155,7 @@ class DevelopmentPipeline:
                 pr="",
                 verification={},
                 blockers=[],
-                artifacts=["issue_snapshot.json", "plan.json", "test_plan.json", "run.log"],
+                artifacts=["issue_snapshot.json", "plan.json", "test_plan.json", "verification_plan.json", "run.log"],
                 audit_trail=[f"{datetime.now(UTC).isoformat()} run started"],
             ),
             workpad_updates_path,
@@ -185,10 +189,12 @@ class DevelopmentPipeline:
         workflow = load_workflow(workspace=workspace_info["workspace"])
         if not workflow:
             workflow = load_workflow(repo_root=".")
+        workflow = self._resolve_workflow(workflow, verification_plan)
         self.state_store.write_execution_artifact(issue_key, "workflow.json", workflow, run_id)
         self.state_store.write_execution_artifact(issue_key, "requirement_summary.json", summary, run_id)
         self.state_store.write_execution_artifact(issue_key, "plan.json", plan, run_id)
         self.state_store.write_execution_artifact(issue_key, "test_plan.json", test_plan, run_id)
+        self.state_store.write_execution_artifact(issue_key, "verification_plan.json", verification_plan, run_id)
         self.state_store.write_execution_artifact(issue_key, "issue.json", issue, run_id)
         self.state_store.write_execution_artifact(
             issue_key,
@@ -338,6 +344,27 @@ class DevelopmentPipeline:
         self.state_store.write_artifact(issue_key, "verification_summary.json", verification)
         self.state_store.write_execution_artifact(issue_key, "verification.json", verification_json, run_id)
         self.state_store.write_artifact(issue_key, "verification.json", verification_json)
+        if self._has_failed_hard_checks(command_results):
+            await self._finalize_failure(
+                issue_key=issue_key,
+                thread_id=thread_id,
+                run_id=run_id,
+                repo_full_name=repo_full_name,
+                issue=issue_snapshot,
+                summary=summary,
+                plan=plan,
+                test_plan=test_plan,
+                state="Rework",
+                failure_type="hard_check_failed",
+                latest_attempt="verification hard checks failed",
+                branch=workspace_info["branch_name"],
+                blockers=[],
+                artifacts=["verification.json", "final_summary.json", "run.log"],
+                verification=verification_json,
+                extra={},
+            )
+            await channel.send("verification の hard check が失敗しました。`/status` と `/why-failed` を確認してください。")
+            return
         if verification.get("status") not in {"success", "passed", "completed"}:
             await self._finalize_failure(
                 issue_key=issue_key,
@@ -552,6 +579,7 @@ class DevelopmentPipeline:
                     "issue_snapshot.json",
                     "plan.json",
                     "test_plan.json",
+                    "verification_plan.json",
                     "changed_files.json",
                     "verification.json",
                     "final_summary.json",
@@ -600,7 +628,7 @@ class DevelopmentPipeline:
             run_id=run_id,
             details=extra,
         )
-        await asyncio.to_thread(
+        await self._run_blocking(
             self._update_issue_tracking,
             repo_full_name,
             int(issue["number"]),
@@ -634,7 +662,11 @@ class DevelopmentPipeline:
     ) -> dict[str, Any]:
         del client, issue_key, run_id
         results: list[dict[str, Any]] = []
-        for phase, command in self._workflow_commands(workflow):
+        for check in self._workflow_commands(workflow):
+            phase = str(check["phase"])
+            command = str(check["command"])
+            category = str(check.get("category", "hard"))
+            allow_not_applicable = bool(check.get("allow_not_applicable", False))
             if is_high_risk_command(command):
                 await channel.send(
                     "禁止または高リスクの workflow command を検出したため停止します。\n"
@@ -646,7 +678,7 @@ class DevelopmentPipeline:
                     "failure_type": "policy_violation",
                     "stopped_before_command": command,
                 }
-            completed = await asyncio.to_thread(
+            completed = await self._run_blocking(
                 subprocess.run,
                 command,
                 cwd=workspace,
@@ -655,50 +687,124 @@ class DevelopmentPipeline:
                 capture_output=True,
             )
             results.append(
-                {
-                    "phase": phase,
-                    "command": command,
-                    "returncode": completed.returncode,
-                    "output": (completed.stdout + completed.stderr)[-4000:],
-                    "success": completed.returncode == 0,
-                }
+                self._command_result(
+                    phase=phase,
+                    category=category,
+                    command=command,
+                    returncode=completed.returncode,
+                    output=(completed.stdout + completed.stderr)[-4000:],
+                    allow_not_applicable=allow_not_applicable,
+                )
             )
         return {"results": results}
 
-    def _workflow_commands(self, workflow: dict[str, Any]) -> list[tuple[str, str]]:
+    def _workflow_commands(self, workflow: dict[str, Any]) -> list[dict[str, Any]]:
         verification = workflow.get("verification", {})
         if isinstance(verification, dict):
             checks = verification.get("required_checks", [])
-            if isinstance(checks, list):
-                normalized_checks = self._normalize_required_checks(checks)
+            advisory_checks = verification.get("advisory_checks", [])
+            if isinstance(checks, list) or isinstance(advisory_checks, list):
+                normalized_checks = self._normalize_required_checks(
+                    checks if isinstance(checks, list) else [],
+                    category="hard",
+                )
+                normalized_checks.extend(
+                    self._normalize_required_checks(
+                        advisory_checks if isinstance(advisory_checks, list) else [],
+                        category="advisory",
+                    )
+                )
                 if normalized_checks:
                     return normalized_checks
         commands = workflow.get("commands", {})
         if not isinstance(commands, dict):
             return []
-        normalized: list[tuple[str, str]] = []
+        normalized: list[dict[str, Any]] = []
         for phase in ("setup", "lint", "test"):
             phase_commands = commands.get(phase, [])
             if not isinstance(phase_commands, list):
                 continue
-            normalized.extend((phase, str(command)) for command in phase_commands if str(command).strip())
+            normalized.extend(
+                {
+                    "phase": phase,
+                    "command": str(command).strip(),
+                    "category": "hard",
+                    "allow_not_applicable": False,
+                }
+                for command in phase_commands
+                if str(command).strip()
+            )
         return normalized
 
-    def _normalize_required_checks(self, checks: list[Any]) -> list[tuple[str, str]]:
-        normalized: list[tuple[str, str]] = []
+    def _normalize_required_checks(self, checks: list[Any], *, category: str) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
         for item in checks:
             if isinstance(item, dict):
                 command = str(item.get("command", "")).strip()
                 if not command:
                     continue
                 name = str(item.get("name", "")).strip() or "check"
-                normalized.append((name, command))
+                normalized.append(
+                    {
+                        "phase": name,
+                        "command": command,
+                        "category": str(item.get("category", category)).strip() or category,
+                        "allow_not_applicable": bool(item.get("allow_not_applicable", False)),
+                    }
+                )
                 continue
             if isinstance(item, str) and item.strip():
                 # String-only checks are accepted for backwards compatibility but do not
                 # provide an executable command. Keep runtime behavior explicit.
                 continue
         return normalized
+
+    def _resolve_workflow(self, workflow: dict[str, Any], verification_plan: dict[str, Any]) -> dict[str, Any]:
+        resolved = dict(workflow)
+        verification = resolved.get("verification", {})
+        if isinstance(verification, dict) and verification.get("required_checks"):
+            return resolved
+        if verification_plan:
+            resolved["verification"] = workflow_verification_from_plan(verification_plan)
+        return resolved
+
+    def _command_result(
+        self,
+        *,
+        phase: str,
+        category: str,
+        command: str,
+        returncode: int,
+        output: str,
+        allow_not_applicable: bool,
+    ) -> dict[str, Any]:
+        status = "pass" if returncode == 0 else "fail"
+        lowered = output.lower()
+        if returncode != 0 and allow_not_applicable and any(
+            marker in lowered
+            for marker in ("no tests ran", "no tests collected", "not found", "no such file or directory")
+        ):
+            status = "not_applicable"
+        return {
+            "phase": phase,
+            "category": category,
+            "command": command,
+            "returncode": returncode,
+            "output": output,
+            "success": status == "pass",
+            "status": status,
+        }
+
+    def _has_failed_hard_checks(self, command_results: dict[str, Any]) -> bool:
+        results = command_results.get("results", []) if isinstance(command_results, dict) else []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("category", "hard")) != "hard":
+                continue
+            if str(item.get("status", "fail")) == "fail":
+                return True
+        return False
 
     def _detect_changed_files(self, workspace: str) -> list[str]:
         output = subprocess.check_output(["git", "-C", workspace, "status", "--porcelain"], text=True)
@@ -743,7 +849,7 @@ class DevelopmentPipeline:
             "",
             "## Test Results",
             *[
-                f"- `{item.get('phase')}` `{item.get('command')}` => {'passed' if item.get('success') else 'failed'}"
+                f"- `{item.get('phase')}` `{item.get('command')}` => {item.get('status', 'fail')}"
                 for item in command_results.get("results", [])[:20]
             ],
             "",
@@ -775,7 +881,7 @@ class DevelopmentPipeline:
                 f"- review decision: {review.get('decision', 'unknown')}",
                 "- command results:",
                 *[
-                    f"  - {item.get('phase')}: `{item.get('command')}` => {'passed' if item.get('success') else 'failed'}"
+                    f"  - {item.get('phase')}: `{item.get('command')}` => {item.get('status', 'fail')}"
                     for item in command_results.get("results", [])[:10]
                 ],
             ]
@@ -810,19 +916,34 @@ class DevelopmentPipeline:
     ) -> dict[str, Any]:
         results = command_results.get("results", []) if isinstance(command_results, dict) else []
         phase_status = {"unit": "not_run", "integration": "not_run", "lint": "not_run", "typecheck": "not_run"}
+        hard_checks: list[dict[str, Any]] = []
+        advisory_checks: list[dict[str, Any]] = []
         for item in results:
             phase = str(item.get("phase", ""))
-            status = "pass" if item.get("success") else "fail"
+            status = str(item.get("status", "fail"))
             if phase == "lint":
                 phase_status["lint"] = status
-            elif phase == "test":
+            elif phase in {"test", "tests"}:
                 phase_status["unit"] = status
+            elif phase == "typecheck":
+                phase_status["typecheck"] = status
+            normalized = {
+                "name": phase,
+                "status": status,
+                "command": str(item.get("command", "")),
+            }
+            if str(item.get("category", "hard")) == "advisory":
+                advisory_checks.append(normalized)
+            else:
+                hard_checks.append(normalized)
         manual_checks = []
         if isinstance(test_plan, dict):
             for name in test_plan.get("manual_checks", []):
                 manual_checks.append({"name": str(name), "status": "not_run"})
         return {
             **phase_status,
+            "hard_checks": hard_checks,
+            "advisory_checks": advisory_checks,
             "manual_checks": manual_checks,
             "notes": verification_summary.get("notes", []) if isinstance(verification_summary, dict) else [],
         }

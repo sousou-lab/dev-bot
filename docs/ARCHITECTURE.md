@@ -33,6 +33,7 @@
 - `requirement_summary.json`
 - `plan.json`
 - `test_plan.json`
+- `verification_plan.json`
 - `verification.json`
 - `changed_files.json`
 - `final_summary.json`
@@ -164,6 +165,16 @@
 - Discord は dispatch の起点ではなく state 変更 UI として扱う
 - Discord 操作後は即時 tick のヒントを出してよいが、最終判定は常に GitHub を見る
 - 同一 `issue_key` に active run は常に 1 つまでとする
+
+## Verification Model
+- repo に `WORKFLOW.md` があれば、その `verification.required_checks` を最優先する
+- repo に `WORKFLOW.md` がない場合は planning lane が `verification_plan.json` を確定し、execution lane はその plan を workflow fallback として使う
+- verification は `hard_checks` と `advisory_checks` に分け、PR gating は `hard_checks` の結果だけで判定する
+- `manual_checks` は通常運用の gate に使わない
+- profile catalog は `python-basic` / `python-typecheck` / `node-basic` / `node-ts` / `static-web` / `generic-minimal` を初期集合とする
+- monorepo や部分変更は profile を増やすのではなく `profile + scope` で扱う
+- planner の例外調整は自由な command 生成ではなく `profile_patch` に限定する
+- `generic-minimal` は最後の fallback であり、常用 profile にしない
 
 ## Failure And Recovery Principles
 - Discord 操作の成功条件は GitHub への反映成功とする

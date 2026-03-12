@@ -8,6 +8,7 @@ from typing import Any
 
 from app.agent_sdk_client import ClaudeAgentClient
 from app.config import Settings
+from app.verification_profiles import build_verification_plan
 
 READ_ONLY_TOOLS = [
     "Read",
@@ -262,6 +263,7 @@ class PlanningArtifacts:
     repo_profile: dict[str, Any]
     plan: dict[str, Any]
     test_plan: dict[str, Any]
+    verification_plan: dict[str, Any]
 
 
 class PlanningAgent:
@@ -317,7 +319,13 @@ class PlanningAgent:
             plan=plan,
             progress_callback=progress_callback,
         )
-        return PlanningArtifacts(repo_profile=repo_profile, plan=plan, test_plan=test_plan)
+        verification_plan = build_verification_plan(workspace=workspace, repo_profile=repo_profile, plan=plan)
+        return PlanningArtifacts(
+            repo_profile=repo_profile,
+            plan=plan,
+            test_plan=test_plan,
+            verification_plan=verification_plan,
+        )
 
     def _has_plannable_summary(self, summary: dict[str, Any]) -> bool:
         goal = str(summary.get("goal", "")).strip()

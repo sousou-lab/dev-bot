@@ -20,6 +20,8 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
         languages.append("python")
     if any(path.endswith((".ts", ".tsx", ".js", ".jsx")) for path in files):
         languages.append("javascript")
+    if any(path.endswith((".ts", ".tsx")) for path in files):
+        languages.append("typescript")
     if repo_config.get("language"):
         configured = str(repo_config["language"]).strip()
         if configured and configured not in languages:
@@ -28,10 +30,15 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
     test_commands: list[str] = []
     setup_commands: list[str] = []
     lint_commands: list[str] = []
+    typecheck_commands: list[str] = []
+    format_commands: list[str] = []
+    build_commands: list[str] = []
     migration = _detect_migration(root, files)
     if pyproject.exists() or requirements.exists():
         test_commands.append("pytest -q")
         lint_commands.append("python -m compileall .")
+        format_commands.append("uv run ruff format --check .")
+        lint_commands.append("uv run ruff check .")
         if requirements.exists():
             setup_commands.append("pip install -r requirements.txt")
         elif pyproject.exists():
@@ -46,11 +53,26 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
             test_commands.append("npm test -- --runInBand")
         if "lint" in scripts:
             lint_commands.append("npm run lint")
+        if "format" in scripts:
+            format_commands.append("npm run format -- --check")
+        if "check-format" in scripts:
+            format_commands.append("npm run check-format")
+        if "build" in scripts:
+            build_commands.append("npm run build")
+        if "typecheck" in scripts:
+            typecheck_commands.append("npm run typecheck")
+        elif (root / "tsconfig.json").exists():
+            typecheck_commands.append("npx tsc --noEmit")
         setup_commands.append("npm install")
+    if any(path.endswith(".html") for path in files) and not package_json.exists() and not pyproject.exists():
+        languages.append("html")
 
     setup_commands = _override_list(repo_config, "setup_cmds", setup_commands)
     test_commands = _override_list(repo_config, "test_cmds", test_commands)
     lint_commands = _override_list(repo_config, "lint_cmds", lint_commands)
+    typecheck_commands = _override_list(repo_config, "typecheck_cmds", typecheck_commands)
+    format_commands = _override_list(repo_config, "format_cmds", format_commands)
+    build_commands = _override_list(repo_config, "build_cmds", build_commands)
     migration = _merge_migration(migration, repo_config.get("migration"))
 
     readme_candidates = [path for path in files if Path(path).name.lower().startswith("readme")]
@@ -62,6 +84,15 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
         "test_commands": _unique(test_commands) or ["pytest -q"],
         "setup_commands": _unique(setup_commands),
         "lint_commands": _unique(lint_commands),
+        "typecheck_commands": _unique(typecheck_commands),
+        "format_commands": _unique(format_commands),
+        "build_commands": _unique(build_commands),
+        "suggested_verification_profile": _suggest_verification_profile(
+            languages=languages,
+            files=files,
+            package_json=package_json.exists(),
+            pyproject=pyproject.exists(),
+        ),
         "migration": migration,
         "readme_files": readme_candidates[:5],
         "files": sample_files,
@@ -153,3 +184,18 @@ def _unique(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _suggest_verification_profile(*, languages: list[str], files: list[str], package_json: bool, pyproject: bool) -> str:
+    language_set = set(languages)
+    if "html" in language_set and not package_json and not pyproject:
+        return "static-web"
+    if "typescript" in language_set:
+        return "node-ts"
+    if "javascript" in language_set:
+        return "node-basic"
+    if "python" in language_set:
+        if any(path.endswith("pyrightconfig.json") for path in files):
+            return "python-typecheck"
+        return "python-basic"
+    return "generic-minimal"

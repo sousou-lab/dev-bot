@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,6 +62,50 @@ def _make_review(decision: str = "approve") -> dict[str, Any]:
 
 def _make_pr() -> dict[str, Any]:
     return {"number": 99, "url": "https://github.com/owner/repo/pull/99"}
+
+
+def _build_sync_pipeline_case(
+    *,
+    workspace_dir: str,
+    state_dir: str,
+    github_client: MagicMock | None = None,
+) -> tuple[DevelopmentPipeline, FileStateStore, InMemoryAdapter, Path]:
+    state_store = FileStateStore(state_dir)
+    state_store.create_run(thread_id=THREAD_ID, parent_message_id=1, channel_id=2)
+    setup_planning_artifacts(THREAD_ID, state_store)
+    state_store.bind_issue(THREAD_ID, "owner/repo", 1)
+
+    client = github_client or MagicMock()
+    client.get_issue_snapshot.return_value = make_test_issue()
+    client.create_pull_request.return_value = _make_pr()
+    client.get_pull_request_status.return_value = {
+        "draft": True,
+        "mergeable": True,
+        "mergeable_state": "clean",
+        "head_sha": "headsha123",
+    }
+    client.ready_pull_request_for_review.return_value = {"ready_for_review": True}
+    client.create_issue_comment.return_value = None
+    client.update_issue_state.return_value = None
+    client.upsert_workpad_comment.return_value = None
+
+    pipeline = DevelopmentPipeline(
+        settings=make_test_settings(workspace_root=workspace_dir, state_dir=state_dir),
+        state_store=state_store,
+        github_client=client,
+        process_registry=ProcessRegistry(state_dir),
+        approval_coordinator=ApprovalCoordinator(state_store),
+    )
+
+    async def _run_blocking(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    pipeline._run_blocking = _run_blocking  # type: ignore[method-assign]
+    adapter = InMemoryAdapter()
+    adapter.register_channel(THREAD_ID)
+    codex_log_path = Path(workspace_dir) / "codex.log"
+    codex_log_path.write_text("codex run log\n", encoding="utf-8")
+    return pipeline, state_store, adapter, codex_log_path
 
 
 class PipelineE2EBase(unittest.IsolatedAsyncioTestCase):
@@ -184,9 +229,33 @@ class TestFullSuccessPath(PipelineE2EBase):
         )
 
         self.assertEqual(
-            [("lint", "ruff check ."), ("tests", "pytest -q")],
+            [
+                {"phase": "lint", "command": "ruff check .", "category": "hard", "allow_not_applicable": False},
+                {"phase": "tests", "command": "pytest -q", "category": "hard", "allow_not_applicable": False},
+            ],
             commands,
         )
+
+    def test_workflow_commands_include_advisory_checks(self) -> None:
+        commands = self.pipeline._workflow_commands(
+            {
+                "verification": {
+                    "required_checks": [{"name": "lint", "command": "ruff check ."}],
+                    "advisory_checks": [{"name": "format", "command": "ruff format --check ."}],
+                }
+            }
+        )
+
+        self.assertEqual("hard", commands[0]["category"])
+        self.assertEqual("advisory", commands[1]["category"])
+
+    def test_resolve_workflow_prefers_repo_workflow_over_verification_plan(self) -> None:
+        resolved = self.pipeline._resolve_workflow(
+            {"verification": {"required_checks": [{"name": "lint", "command": "ruff check ."}]}},
+            {"hard_checks": [{"name": "tests", "command": "pytest -q"}]},
+        )
+
+        self.assertEqual("ruff check .", resolved["verification"]["required_checks"][0]["command"])
 
     async def test_full_success_path_creates_pr(self) -> None:
         with (
@@ -240,96 +309,273 @@ class TestFullSuccessPath(PipelineE2EBase):
                 repo_full_name="owner/repo",
                 issue=make_test_issue(),
             )
-
         self.adapter.assert_message_order(THREAD_ID, ["run を開始", "Codex 実装が完了", "draft PR"])
 
 
-class TestCodexFailure(PipelineE2EBase):
-    async def test_codex_failure_notifies_and_marks_failed(self) -> None:
-        with (
-            self._patch_workspace(),
-            self._patch_codex(returncode=1),
-            self._patch_detect_changed(),
-            self._patch_workflow(),
-            self._patch_workflow_text(),
-        ):
-            await self.pipeline.execute_run(
-                chat=self.adapter,
-                thread_id=THREAD_ID,
-                repo_full_name="owner/repo",
-                issue=make_test_issue(),
+class TestCodexFailure(unittest.TestCase):
+    def test_codex_failure_notifies_and_marks_failed(self) -> None:
+        async def run_case() -> tuple[list[str], dict[str, Any]]:
+            tmpdir = tempfile.TemporaryDirectory()
+            state_dir = tmpdir.name
+            workspace_dir = tempfile.mkdtemp()
+
+            state_store = FileStateStore(state_dir)
+            state_store.create_run(thread_id=THREAD_ID, parent_message_id=1, channel_id=2)
+            setup_planning_artifacts(THREAD_ID, state_store)
+            state_store.bind_issue(THREAD_ID, "owner/repo", 1)
+
+            github_client = MagicMock()
+            github_client.get_issue_snapshot.return_value = make_test_issue()
+            github_client.update_issue_state.return_value = None
+            github_client.upsert_workpad_comment.return_value = None
+
+            pipeline = DevelopmentPipeline(
+                settings=make_test_settings(workspace_root=workspace_dir, state_dir=state_dir),
+                state_store=state_store,
+                github_client=github_client,
+                process_registry=ProcessRegistry(state_dir),
+                approval_coordinator=ApprovalCoordinator(state_store),
             )
 
-        self.adapter.assert_message_contains(THREAD_ID, "Codex 実装で失敗しました")
-        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
+            async def _run_blocking(func, /, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            pipeline._run_blocking = _run_blocking  # type: ignore[method-assign]
+            adapter = InMemoryAdapter()
+            adapter.register_channel(THREAD_ID)
+            codex_log_path = Path(workspace_dir) / "codex.log"
+            codex_log_path.write_text("codex run log\n", encoding="utf-8")
+
+            with (
+                patch.object(
+                    pipeline.workspace_manager,
+                    "prepare",
+                    side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir),
+                ),
+                patch.object(
+                    pipeline.codex_runner,
+                    "run",
+                    side_effect=lambda *args, **kwargs: _make_codex_result(returncode=1, stdout_path=str(codex_log_path)),
+                ),
+                patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
+                patch("app.pipeline.load_workflow", return_value={"commands": {}}),
+                patch("app.pipeline.workflow_text", return_value="workflow text"),
+            ):
+                await pipeline.execute_run(
+                    chat=adapter,
+                    thread_id=THREAD_ID,
+                    repo_full_name="owner/repo",
+                    issue=make_test_issue(),
+                )
+
+            return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
+
+        messages, meta = asyncio.run(run_case())
+        self.assertTrue(any("Codex 実装で失敗しました" in item for item in messages))
+        self.assertEqual("Rework", meta.get("status"))
 
 
-class TestVerificationFailure(PipelineE2EBase):
-    async def test_verification_failure_notifies_and_marks_failed(self) -> None:
-        with (
-            self._patch_workspace(),
-            self._patch_codex(),
-            self._patch_detect_changed(),
-            self._patch_workflow(),
-            self._patch_workflow_text(),
-            self._patch_verify(status="failed"),
-        ):
-            await self.pipeline.execute_run(
-                chat=self.adapter,
-                thread_id=THREAD_ID,
-                repo_full_name="owner/repo",
-                issue=make_test_issue(),
+class TestVerificationGating(unittest.TestCase):
+    def test_hard_check_failure_blocks_pr_even_when_verifier_returns_success(self) -> None:
+        async def run_case() -> tuple[list[str], dict[str, Any]]:
+            tmpdir = tempfile.TemporaryDirectory()
+            workspace_dir = tempfile.mkdtemp()
+            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(
+                workspace_dir=workspace_dir,
+                state_dir=tmpdir.name,
+            )
+            workflow = {
+                "verification": {
+                    "required_checks": [{"name": "lint", "command": "python -c \"import sys; sys.exit(1)\""}],
+                }
+            }
+            with (
+                patch.object(
+                    pipeline.workspace_manager,
+                    "prepare",
+                    side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir),
+                ),
+                patch.object(
+                    pipeline.codex_runner,
+                    "run",
+                    side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path)),
+                ),
+                patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
+                patch("app.pipeline.load_workflow", return_value=workflow),
+                patch("app.pipeline.workflow_text", return_value="workflow text"),
+                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification("success")),
+            ):
+                await pipeline.execute_run(
+                    chat=adapter,
+                    thread_id=THREAD_ID,
+                    repo_full_name="owner/repo",
+                    issue=make_test_issue(),
+                )
+            return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
+
+        messages, meta = asyncio.run(run_case())
+        self.assertTrue(any("hard check が失敗しました" in item for item in messages))
+        self.assertEqual("Rework", meta.get("status"))
+
+
+class TestVerificationPlanFallback(unittest.TestCase):
+    def test_verification_plan_fallback_drives_checks_when_workflow_missing(self) -> None:
+        async def run_case() -> tuple[dict[str, Any], list[str]]:
+            tmpdir = tempfile.TemporaryDirectory()
+            state_dir = tmpdir.name
+            workspace_dir = tempfile.mkdtemp()
+
+            state_store = FileStateStore(state_dir)
+            state_store.create_run(thread_id=THREAD_ID, parent_message_id=1, channel_id=2)
+            setup_planning_artifacts(
+                THREAD_ID,
+                state_store,
+                verification_plan={
+                    "profile": "generic-minimal",
+                    "hard_checks": [{"name": "sanity", "command": "sh -c 'exit 0'"}],
+                    "advisory_checks": [{"name": "format", "command": "sh -c 'exit 1'", "allow_not_applicable": True}],
+                },
+            )
+            state_store.bind_issue(THREAD_ID, "owner/repo", 1)
+
+            github_client = MagicMock()
+            github_client.get_issue_snapshot.return_value = make_test_issue()
+            github_client.create_pull_request.return_value = _make_pr()
+            github_client.get_pull_request_status.return_value = {
+                "draft": True,
+                "mergeable": True,
+                "mergeable_state": "clean",
+                "head_sha": "headsha123",
+            }
+            github_client.ready_pull_request_for_review.return_value = {"ready_for_review": True}
+            github_client.create_issue_comment.return_value = None
+            github_client.update_issue_state.return_value = None
+            github_client.upsert_workpad_comment.return_value = None
+
+            pipeline = DevelopmentPipeline(
+                settings=make_test_settings(workspace_root=workspace_dir, state_dir=state_dir),
+                state_store=state_store,
+                github_client=github_client,
+                process_registry=ProcessRegistry(state_dir),
+                approval_coordinator=ApprovalCoordinator(state_store),
             )
 
-        self.adapter.assert_message_contains(THREAD_ID, "verification が失敗しました")
-        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
+            async def _run_blocking(func, /, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            pipeline._run_blocking = _run_blocking  # type: ignore[method-assign]
+            adapter = InMemoryAdapter()
+            adapter.register_channel(THREAD_ID)
+            codex_log_path = Path(workspace_dir) / "codex.log"
+            codex_log_path.write_text("codex run log\n", encoding="utf-8")
+
+            with (
+                patch.object(
+                    pipeline.workspace_manager,
+                    "prepare",
+                    side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir),
+                ),
+                patch.object(
+                    pipeline.codex_runner,
+                    "run",
+                    side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path)),
+                ),
+                patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
+                patch("app.pipeline.load_workflow", return_value={}),
+                patch("app.pipeline.workflow_text", return_value="workflow text"),
+                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()),
+                patch.object(pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: _make_review()),
+                patch.object(pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"),
+                patch.object(pipeline, "_commit_and_push", side_effect=lambda *args, **kwargs: True),
+            ):
+                await pipeline.execute_run(
+                    chat=adapter,
+                    thread_id=THREAD_ID,
+                    repo_full_name="owner/repo",
+                    issue=make_test_issue(),
+                )
+
+            return state_store.load_artifact(ISSUE_KEY, "command_results.json"), adapter.messages_for(THREAD_ID)
+
+        command_results, messages = asyncio.run(run_case())
+        self.assertEqual("hard", command_results["results"][0]["category"])
+        self.assertEqual("advisory", command_results["results"][1]["category"])
+        self.assertEqual("fail", command_results["results"][1]["status"])
+        self.assertTrue(any("draft PR" in item for item in messages))
 
 
-class TestReviewReject(PipelineE2EBase):
-    async def test_review_reject_aborts_pr(self) -> None:
-        with (
-            self._patch_workspace(),
-            self._patch_codex(),
-            self._patch_detect_changed(),
-            self._patch_workflow(),
-            self._patch_workflow_text(),
-            self._patch_verify(),
-            self._patch_review(decision="reject"),
-            self._patch_git_diff(),
-        ):
-            await self.pipeline.execute_run(
-                chat=self.adapter,
-                thread_id=THREAD_ID,
-                repo_full_name="owner/repo",
-                issue=make_test_issue(),
+class TestVerificationFailure(unittest.TestCase):
+    def test_verification_failure_notifies_and_marks_failed(self) -> None:
+        async def run_case() -> tuple[list[str], dict[str, Any]]:
+            tmpdir = tempfile.TemporaryDirectory()
+            workspace_dir = tempfile.mkdtemp()
+            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(
+                workspace_dir=workspace_dir,
+                state_dir=tmpdir.name,
             )
+            with (
+                patch.object(pipeline.workspace_manager, "prepare", side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir)),
+                patch.object(pipeline.codex_runner, "run", side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path))),
+                patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
+                patch("app.pipeline.load_workflow", return_value={"commands": {}}),
+                patch("app.pipeline.workflow_text", return_value="workflow text"),
+                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification("failed")),
+            ):
+                await pipeline.execute_run(chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue())
+            return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
 
-        self.adapter.assert_message_contains(THREAD_ID, "review が reject")
-        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
+        messages, meta = asyncio.run(run_case())
+        self.assertTrue(any("verification が失敗しました" in item for item in messages))
+        self.assertEqual("Rework", meta.get("status"))
 
 
-class TestNoChanges(PipelineE2EBase):
-    async def test_no_changes_aborts_pr(self) -> None:
-        with (
-            self._patch_workspace(),
-            self._patch_codex(),
-            self._patch_detect_changed(),
-            self._patch_workflow(),
-            self._patch_workflow_text(),
-            self._patch_verify(),
-            self._patch_review(),
-            self._patch_git_diff(),
-            self._patch_commit_push(False),
-        ):
-            await self.pipeline.execute_run(
-                chat=self.adapter,
-                thread_id=THREAD_ID,
-                repo_full_name="owner/repo",
-                issue=make_test_issue(),
-            )
+class TestReviewReject(unittest.TestCase):
+    def test_review_reject_aborts_pr(self) -> None:
+        async def run_case() -> tuple[list[str], dict[str, Any]]:
+            tmpdir = tempfile.TemporaryDirectory()
+            workspace_dir = tempfile.mkdtemp()
+            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(workspace_dir=workspace_dir, state_dir=tmpdir.name)
+            with (
+                patch.object(pipeline.workspace_manager, "prepare", side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir)),
+                patch.object(pipeline.codex_runner, "run", side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path))),
+                patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
+                patch("app.pipeline.load_workflow", return_value={"commands": {}}),
+                patch("app.pipeline.workflow_text", return_value="workflow text"),
+                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()),
+                patch.object(pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: _make_review("reject")),
+                patch.object(pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"),
+            ):
+                await pipeline.execute_run(chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue())
+            return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
 
-        self.adapter.assert_message_contains(THREAD_ID, "変更差分が作られなかった")
-        self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Rework")
+        messages, meta = asyncio.run(run_case())
+        self.assertTrue(any("review が reject" in item for item in messages))
+        self.assertEqual("Rework", meta.get("status"))
+
+
+class TestNoChanges(unittest.TestCase):
+    def test_no_changes_aborts_pr(self) -> None:
+        async def run_case() -> tuple[list[str], dict[str, Any]]:
+            tmpdir = tempfile.TemporaryDirectory()
+            workspace_dir = tempfile.mkdtemp()
+            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(workspace_dir=workspace_dir, state_dir=tmpdir.name)
+            with (
+                patch.object(pipeline.workspace_manager, "prepare", side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir)),
+                patch.object(pipeline.codex_runner, "run", side_effect=lambda *args, **kwargs: _make_codex_result(returncode=0, stdout_path=str(codex_log_path))),
+                patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
+                patch("app.pipeline.load_workflow", return_value={"commands": {}}),
+                patch("app.pipeline.workflow_text", return_value="workflow text"),
+                patch.object(pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()),
+                patch.object(pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: _make_review()),
+                patch.object(pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"),
+                patch.object(pipeline, "_commit_and_push", side_effect=lambda *args, **kwargs: False),
+            ):
+                await pipeline.execute_run(chat=adapter, thread_id=THREAD_ID, repo_full_name="owner/repo", issue=make_test_issue())
+            return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
+
+        messages, meta = asyncio.run(run_case())
+        self.assertTrue(any("変更差分が作られなかった" in item for item in messages))
+        self.assertEqual("Rework", meta.get("status"))
 
 
 class TestMissingArtifacts(PipelineE2EBase):

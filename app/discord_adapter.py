@@ -172,6 +172,7 @@ DERIVED_ARTIFACTS = (
     "workspace.json",
     "plan.json",
     "test_plan.json",
+    "verification_plan.json",
     "repo_profile.json",
     "planning_workspace.json",
     "current_activity.json",
@@ -390,6 +391,7 @@ class DevBotClient(discord.Client):
             ("summary", "requirement_summary.json"),
             ("plan", "plan.json"),
             ("test_plan", "test_plan.json"),
+            ("verification_plan", "verification_plan.json"),
             ("repo_profile", "repo_profile.json"),
             ("planning_workspace", "planning_workspace.json"),
             ("agent_error", "agent_error.json"),
@@ -1225,6 +1227,7 @@ class DevBotClient(discord.Client):
         planning_artifacts = {
             "plan": artifacts["plan"],
             "test_plan": artifacts["test_plan"],
+            "verification_plan": artifacts["verification_plan"],
             "repo_profile": artifacts["repo_profile"],
             "planning_workspace": artifacts["planning_workspace"],
             "planning_sessions": artifacts["planning_sessions"],
@@ -1463,6 +1466,7 @@ class DevBotClient(discord.Client):
             "repo_profile": built.repo_profile,
             "plan": built.plan,
             "test_plan": built.test_plan,
+            "verification_plan": built.verification_plan,
             "planning_workspace": planning_workspace,
             "planning_sessions": progress_state,
         }
