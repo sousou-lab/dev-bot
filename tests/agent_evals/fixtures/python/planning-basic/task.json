@@ -1,0 +1,17 @@
+{
+  "task_id": "py-planning-001",
+  "language": "python",
+  "fixture_repo": "fixtures/python/planning-basic/repo",
+  "task_type": "planning",
+  "issue_prompt": "Fix scheduler gate validation for Project v2 backed issues.",
+  "golden": {
+    "acceptance_criteria": [
+      "Require Plan=Approved before dispatch",
+      "Keep In Progress as reconcile-only state"
+    ],
+    "candidate_files": [
+      "app/issue_scheduler.py",
+      "tests/test_issue_scheduler.py"
+    ]
+  }
+}

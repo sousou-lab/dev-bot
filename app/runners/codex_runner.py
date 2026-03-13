@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from itertools import count
 from pathlib import Path
 from typing import Any
+
+from app.runners.codex_app_server_backend import CodexAppServerBackend
+from app.runners.execution_backend import RunSpec
 
 
 @dataclass(frozen=True)
@@ -31,11 +33,13 @@ class CodexRunner:
         codex_bin: str = "codex",
         *,
         app_server_command: str = "codex app-server",
-        model: str = "gpt-5-codex",
+        model: str = "gpt-5.4",
+        app_server_backend_factory: Callable[[str], CodexAppServerBackend] | None = None,
     ) -> None:
         self.codex_bin = codex_bin
         self.app_server_command = app_server_command
         self.model = model
+        self.app_server_backend_factory = app_server_backend_factory or CodexAppServerBackend
 
     def build_prompt(
         self,
@@ -99,6 +103,7 @@ class CodexRunner:
         try:
             return self._run_app_server(
                 workspace=workspace,
+                run_dir=run_dir,
                 stdout_path=stdout_path,
                 prompt=prompt,
                 on_process_start=on_process_start,
@@ -119,135 +124,43 @@ class CodexRunner:
         self,
         *,
         workspace: str,
+        run_dir: str,
         stdout_path: Path,
         prompt: str,
         on_process_start: Callable[[int], None] | None,
         on_process_exit: Callable[[], None] | None,
     ) -> CodexRunResult:
-        cmd = shlex.split(self.app_server_command)
-        env = os.environ.copy()
-        request_ids = count(1)
-        summary_chunks: list[str] = []
-        turn_completed = False
-        returncode = 1
-        oversized_json_failure = False
-
         with stdout_path.open("w", encoding="utf-8") as log_fh:
-            process = subprocess.Popen(
-                cmd,
-                cwd=workspace,
-                env=env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,
-                bufsize=1,
-            )
-            if on_process_start is not None:
-                on_process_start(process.pid)
             try:
-                assert process.stdin is not None
-                assert process.stdout is not None
-
-                init_id = next(request_ids)
-                self._send_message(
-                    process.stdin,
-                    {
-                        "jsonrpc": "2.0",
-                        "id": init_id,
-                        "method": "initialize",
-                        "params": {"protocolVersion": "0.1", "experimentalApi": True},
-                    },
-                )
-                self._wait_for_response(process.stdout, log_fh, init_id)
-                self._send_message(
-                    process.stdin,
-                    {"jsonrpc": "2.0", "method": "initialized", "params": {}},
-                )
-
-                thread_id = next(request_ids)
-                self._send_message(
-                    process.stdin,
-                    {
-                        "jsonrpc": "2.0",
-                        "id": thread_id,
-                        "method": "thread/start",
-                        "params": {
-                            "model": self.model,
-                            "cwd": workspace,
-                            "approvalPolicy": "never",
-                            "sandbox": {
-                                "type": "workspace-write",
-                                "writableRoots": [workspace],
-                                "networkAccess": False,
-                            },
-                        },
-                    },
-                )
-                # Normal retries always create a fresh run/thread boundary. `thread/resume`
-                # is reserved for crash recovery of the same run and is not used here.
-                thread_response = self._wait_for_response(process.stdout, log_fh, thread_id)
-                server_thread_id = self._extract_thread_id(thread_response)
-
-                turn_id = next(request_ids)
-                self._send_message(
-                    process.stdin,
-                    self._build_turn_start_message(
-                        request_id=turn_id,
-                        thread_id=server_thread_id,
-                        prompt=prompt,
+                result = asyncio.run(
+                    self._run_app_server_backend(
                         workspace=workspace,
-                    ),
+                        run_dir=run_dir,
+                        prompt=prompt,
+                        on_process_start=on_process_start,
+                    )
                 )
-                self._wait_for_response(process.stdout, log_fh, turn_id)
-
-                for raw_line in process.stdout:
-                    log_fh.write(raw_line)
-                    log_fh.flush()
-                    if self._is_oversized_json_reader_failure(raw_line):
-                        oversized_json_failure = True
-                    payload = self._safe_json(raw_line)
-                    if payload is None:
-                        continue
-                    if "id" in payload and "method" in payload and "result" not in payload and "error" not in payload:
-                        self._send_message(
-                            process.stdin,
-                            {
-                                "jsonrpc": "2.0",
-                                "id": payload["id"],
-                                "error": {"code": -32000, "message": "interactive requests disabled"},
-                            },
-                        )
-                        continue
-                    method = str(payload.get("method", ""))
-                    if method:
-                        delta = self._extract_text_delta(payload)
-                        if delta:
-                            summary_chunks.append(delta)
-                        if method == "turn/completed":
-                            turn_completed = True
-                            returncode = 0
-                            break
-                        if method == "turn/failed":
-                            returncode = 1
-                            break
-                if not turn_completed and returncode == 0:
-                    returncode = 1
             finally:
-                try:
-                    process.terminate()
-                    process.wait(timeout=1)
-                except Exception:
-                    pass
                 if on_process_exit is not None:
                     on_process_exit()
-
-        if oversized_json_failure:
-            raise RuntimeError("codex app-server failed due to oversized JSON message")
-
-        changed_files = self._detect_changed_files(workspace)
-        summary = "".join(summary_chunks).strip() or f"Codex app-server finished with return code {returncode}"
+        if result.raw_event_log_path:
+            raw_event_log = Path(result.raw_event_log_path)
+            if raw_event_log.exists():
+                log_fh = stdout_path.open("a", encoding="utf-8")
+                try:
+                    log_fh.write(raw_event_log.read_text(encoding="utf-8"))
+                finally:
+                    log_fh.close()
+        default_changed_files = self._detect_changed_files(workspace)
+        changed_files = result.changed_files or default_changed_files
+        summary = result.summary
+        returncode = result.returncode
+        self._write_implementation_result(
+            artifacts_dir=Path(stdout_path).parent,
+            summary=summary,
+            changed_files=changed_files,
+            payload=result.implementation_result,
+        )
         (Path(stdout_path).parent / "changed_files.json").write_text(
             json.dumps({"changed_files": changed_files}, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -259,6 +172,37 @@ class CodexRunner:
             summary=summary,
             mode="app-server",
         )
+
+    async def _run_app_server_backend(
+        self,
+        *,
+        workspace: str,
+        run_dir: str,
+        prompt: str,
+        on_process_start: Callable[[int], None] | None,
+    ):
+        backend = self.app_server_backend_factory(self.app_server_command)
+        handle = await backend.start_run(
+            RunSpec(
+                run_id="run",
+                issue_key="issue",
+                candidate_id="primary",
+                cwd=workspace,
+                prompt=prompt,
+                model=self.model,
+                service_name="dev-bot",
+                output_schema_name="implementation_result_v1",
+                artifacts_dir=str(Path(run_dir) / "artifacts"),
+                writable_roots=[workspace],
+                read_only_roots=[],
+                network_access=False,
+                allow_turn_steer=False,
+                allow_thread_resume_same_run_only=True,
+            )
+        )
+        if on_process_start is not None and handle.process_id is not None:
+            on_process_start(handle.process_id)
+        return await backend.collect_outputs(handle)
 
     def _run_exec_fallback(
         self,
@@ -304,6 +248,11 @@ class CodexRunner:
 
         changed_files = self._detect_changed_files(workspace)
         summary = f"Codex exec fallback finished with return code {returncode}"
+        self._write_implementation_result(
+            artifacts_dir=Path(stdout_path).parent,
+            summary=summary,
+            changed_files=changed_files,
+        )
         (Path(stdout_path).parent / "changed_files.json").write_text(
             json.dumps({"changed_files": changed_files}, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -345,11 +294,16 @@ class CodexRunner:
                 "input": [{"type": "text", "text": prompt}],
                 "cwd": workspace,
                 "approvalPolicy": "never",
+                "model": self.model,
+                "effort": "medium",
+                "summary": "concise",
                 "sandboxPolicy": {
                     "type": "workspace-write",
                     "writableRoots": [workspace],
                     "networkAccess": False,
                 },
+                "serviceName": "dev-bot",
+                "outputSchema": self._implementation_output_schema(),
             },
         }
 
@@ -403,6 +357,84 @@ class CodexRunner:
 
     def _is_oversized_json_reader_failure(self, raw_line: str) -> bool:
         return all(marker in raw_line for marker in self._APP_SERVER_OVERSIZED_JSON_MARKERS)
+
+    def _implementation_output_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "candidate_id": {"type": "string"},
+                "summary": {"type": "string"},
+                "changed_files": {"type": "array", "items": {"type": "string"}},
+                "tests_run": {"type": "array", "items": {"type": "string"}},
+                "followups": {"type": "array", "items": {"type": "string"}},
+                "blocked_reasons": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["candidate_id", "summary", "changed_files"],
+            "additionalProperties": False,
+        }
+
+    def _extract_structured_output(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return None
+        candidates = [
+            params.get("output"),
+            params.get("structuredOutput"),
+            params.get("structured_output"),
+        ]
+        result = params.get("result")
+        if isinstance(result, dict):
+            candidates.extend(
+                [
+                    result.get("output"),
+                    result.get("structuredOutput"),
+                    result.get("structured_output"),
+                ]
+            )
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                return candidate
+        return None
+
+    def _normalize_changed_files(self, value: Any, fallback: list[str]) -> list[str]:
+        if not isinstance(value, list):
+            return fallback
+        changed_files = [str(item).strip() for item in value if str(item).strip()]
+        return changed_files or fallback
+
+    def _write_implementation_result(
+        self,
+        *,
+        artifacts_dir: Path,
+        summary: str,
+        changed_files: list[str],
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        data = {
+            "candidate_id": "primary",
+            "summary": summary,
+            "changed_files": changed_files,
+            "tests_run": [],
+            "followups": [],
+            "blocked_reasons": [],
+        }
+        if isinstance(payload, dict):
+            candidate_id = str(payload.get("candidate_id", "")).strip()
+            if candidate_id:
+                data["candidate_id"] = candidate_id
+            tests_run = payload.get("tests_run")
+            if isinstance(tests_run, list):
+                data["tests_run"] = [str(item) for item in tests_run if str(item).strip()]
+            followups = payload.get("followups")
+            if isinstance(followups, list):
+                data["followups"] = [str(item) for item in followups if str(item).strip()]
+            blocked_reasons = payload.get("blocked_reasons")
+            if isinstance(blocked_reasons, list):
+                data["blocked_reasons"] = [str(item) for item in blocked_reasons if str(item).strip()]
+        (artifacts_dir / "implementation_result.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _detect_changed_files(self, workspace: str) -> list[str]:
         try:

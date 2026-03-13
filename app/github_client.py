@@ -138,6 +138,18 @@ class GitHubIssueClient:
             raise RuntimeError(f"GitHub comment creation failed: {getattr(exc, 'data', exc)}") from exc
         return {"id": comment.id, "url": comment.html_url}
 
+    def create_inline_review_comment(
+        self, repo_full_name: str, pr_number: int, path: str, line: int, body: str
+    ) -> dict[str, Any]:
+        repo = self._get_repo(repo_full_name)
+        try:
+            pull = repo.get_pull(number=pr_number)
+            commit_id = str(getattr(getattr(pull, "head", None), "sha", "") or "")
+            comment = pull.create_review_comment(body=body, commit=commit_id, path=path, line=line)
+        except GithubException as exc:
+            raise RuntimeError(f"GitHub inline review comment creation failed: {getattr(exc, 'data', exc)}") from exc
+        return {"id": getattr(comment, "id", None), "url": str(getattr(comment, "html_url", "") or "")}
+
     def get_issue_snapshot(self, repo_full_name: str, issue_number: int) -> dict[str, Any]:
         repo = self._get_repo(repo_full_name)
         try:

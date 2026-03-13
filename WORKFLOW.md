@@ -47,6 +47,7 @@ workspace:
   keep_successful_workspaces: true
   key_template: "{owner}/{repo}#{issue_number}"
   branch_template: "agent/gh-{issue_number}-{slug}"
+  candidate_branch_template: "agent/gh-{issue_number}-{slug}-{candidate_id}"
 
 hooks:
   after_create: ./scripts/agent_after_create.sh
@@ -73,16 +74,79 @@ codex:
   network_access: false
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
+  allow_turn_steer: true
+  allow_thread_resume_same_run_only: true
+  service_name: dev-bot
+
+review:
+  enabled: true
+  provider: claude-agent-sdk
+  rules_file: REVIEW.md
+  post_inline_to_github: true
+  thresholds:
+    min_confidence_to_report: 0.80
+    verifier_required: true
+  roles:
+    diff_reviewer: {}
+    history_reviewer: {}
+    contract_reviewer: {}
+    test_reviewer: {}
+    evidence_verifier: {}
+    ranker: {}
 
 planning:
   provider: claude-agent-sdk
   enabled: true
+  mode: committee
   cwd_source: plan_workspace
   max_turns: 4
   timeout_seconds: 300
   settings_sources: [project]
   allowed_tools: [Read, Grep, Glob]
   skill_mode: explicit_project_filesystem
+  committee:
+    roles:
+      repo_explorer:
+        mode: query
+        allowed_tools: [Read, Grep, Glob]
+        disallowed_tools: [Edit, Write, Bash, WebSearch, WebFetch]
+        output_schema: repo_explorer_v1
+      risk_test_planner:
+        mode: query
+        allowed_tools: [Read, Grep, Glob]
+        disallowed_tools: [Edit, Write, Bash, WebSearch, WebFetch]
+        output_schema: risk_test_plan_v1
+      constraint_checker:
+        mode: query
+        allowed_tools: [Read, Grep, Glob]
+        disallowed_tools: [Edit, Write, Bash, WebSearch, WebFetch]
+        output_schema: constraint_report_v1
+      merger:
+        mode: query
+        allowed_tools: [Read, Grep, Glob]
+        disallowed_tools: [Edit, Write, Bash, WebSearch, WebFetch]
+        output_schema: plan_v2
+  gates:
+    require_out_of_scope: true
+    require_candidate_files: true
+    require_test_mapping: true
+    require_verification_profile: true
+    require_design_branches: true
+
+implementation:
+  backend: codex-app-server
+  optional_backends: [codex-sdk-sidecar]
+  single_writer_default: true
+  candidate_mode:
+    enabled: true
+    max_parallel_editors: 2
+    triggers:
+      rework_count_gte: 1
+      planner_confidence_lt: 0.75
+      require_clear_design_branches: true
+  push_policy:
+    push_only_winner: true
+    cleanup_loser_local_branches: true
 
 verification:
   required_artifacts:
@@ -90,10 +154,17 @@ verification:
     - requirement_summary.json
     - plan.json
     - test_plan.json
+    - verification_plan.json
     - changed_files.json
+    - implementation_result.json
+    - review_findings.json
     - verification.json
     - final_summary.json
     - run.log
+    - workpad_updates.jsonl
+    - runner_metadata.json
+    - incident_bundle_manifest.json
+    - incident_bundle_summary.md
   required_checks:
     - name: format
       command: uv run ruff format --check app/ tests/
@@ -112,6 +183,27 @@ github:
   sync_workpad: true
   state_source_of_truth: project_v2
   require_plan_field_approved: true
+
+debug:
+  incident_bundle:
+    enabled: true
+    mount_readonly: true
+    freeze_on_human_review: true
+    cleanup_on_terminal: true
+    keep_provenance_after_cleanup: true
+
+evals:
+  enabled: true
+  strategy: synthetic_first
+  fixtures_root: tests/agent_evals/fixtures/python
+  graders:
+    planning: mechanical_plus_judge
+    review: precision_recall_plus_judge
+    implementation: pass1_scope_latency
+
+telemetry:
+  sink: jsonl
+  otel_compatible_fields: true
 
 discord:
   enabled: true

@@ -174,6 +174,9 @@ DERIVED_ARTIFACTS = (
     "plan.json",
     "test_plan.json",
     "verification_plan.json",
+    "candidate_decision.json",
+    "committee_plan.json",
+    "committee_reports.json",
     "repo_profile.json",
     "planning_workspace.json",
     "current_activity.json",
@@ -393,6 +396,9 @@ class DevBotClient(discord.Client):
             ("plan", "plan.json"),
             ("test_plan", "test_plan.json"),
             ("verification_plan", "verification_plan.json"),
+            ("candidate_decision", "candidate_decision.json"),
+            ("committee_plan", "committee_plan.json"),
+            ("committee_reports", "committee_reports.json"),
             ("repo_profile", "repo_profile.json"),
             ("planning_workspace", "planning_workspace.json"),
             ("agent_error", "agent_error.json"),
@@ -1236,6 +1242,8 @@ class DevBotClient(discord.Client):
             "plan": artifacts["plan"],
             "test_plan": artifacts["test_plan"],
             "verification_plan": artifacts["verification_plan"],
+            "committee_plan": artifacts.get("committee_plan") or {},
+            "committee_reports": artifacts.get("committee_reports") or {},
             "repo_profile": artifacts["repo_profile"],
             "planning_workspace": artifacts["planning_workspace"],
             "planning_sessions": artifacts["planning_sessions"],
@@ -1481,14 +1489,21 @@ class DevBotClient(discord.Client):
             workspace=planning_workspace["workspace"],
             summary=summary,
             repo_profile=repo_profile,
+            rework_count=int(self.state_store.load_meta(self._runtime_key(thread_id)).get("attempt_count", 0) or 0),
             progress_callback=report_progress,
             debug_recorder=record_debug,
         )
+        candidate_decision = getattr(built, "candidate_decision", None) or {}
+        committee_plan = getattr(built, "committee_plan", None) or {}
+        committee_reports = getattr(built, "committee_reports", None) or {}
         return {
             "repo_profile": built.repo_profile,
             "plan": built.plan,
             "test_plan": built.test_plan,
             "verification_plan": built.verification_plan,
+            "candidate_decision": candidate_decision,
+            "committee_plan": committee_plan,
+            "committee_reports": committee_reports,
             "planning_workspace": planning_workspace,
             "planning_sessions": progress_state,
         }

@@ -291,6 +291,58 @@ class TestFullSuccessPath(PipelineE2EBase):
         self.github_client.ready_pull_request_for_review.assert_called_with("owner/repo", 99)
         self.assertFalse(self.state_store.load_artifact(ISSUE_KEY, "pr.json")["draft"])
 
+    async def test_full_success_path_posts_inline_review_findings_when_enabled(self) -> None:
+        review = {
+            "decision": "approve",
+            "unnecessary_changes": [],
+            "test_gaps": [],
+            "risk_items": ["bug"],
+            "protected_path_touches": [],
+            "postable_findings": [
+                {
+                    "id": "R1",
+                    "severity": "high",
+                    "origin": "introduced",
+                    "confidence": 0.91,
+                    "file": "app/file.py",
+                    "line_start": 10,
+                    "line_end": 12,
+                    "claim": "bug",
+                    "evidence": ["diff shows regression"],
+                    "verifier_status": "confirmed",
+                }
+            ],
+        }
+        workflow = {
+            "commands": {},
+            "config": type(
+                "WorkflowCfg",
+                (),
+                {"review": type("ReviewCfg", (), {"post_inline_to_github": True})()},
+            )(),
+        }
+        with (
+            self._patch_workspace(),
+            self._patch_codex(),
+            self._patch_detect_changed(),
+            self._patch_workflow(workflow),
+            self._patch_workflow_text(),
+            self._patch_verify(),
+            patch.object(self.pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: review),
+            self._patch_git_diff(),
+            self._patch_commit_push(True),
+        ):
+            await self.pipeline.execute_run(
+                chat=self.adapter,
+                thread_id=THREAD_ID,
+                repo_full_name="owner/repo",
+                issue=make_test_issue(),
+            )
+
+        self.github_client.create_inline_review_comment.assert_called_once()
+        self.assertEqual(99, self.github_client.create_inline_review_comment.call_args.kwargs["pr_number"])
+        self.assertEqual("app/file.py", self.github_client.create_inline_review_comment.call_args.kwargs["path"])
+
     async def test_message_order_in_success_path(self) -> None:
         with (
             self._patch_workspace(),

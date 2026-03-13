@@ -1,0 +1,10 @@
+{
+  "task_id": "py-impl-001",
+  "language": "python",
+  "fixture_repo": "fixtures/python/debug-bundle/repo",
+  "task_type": "implementation",
+  "issue_prompt": "Fix a regression using only an anonymized debug bundle.",
+  "golden": {
+    "success": true
+  }
+}

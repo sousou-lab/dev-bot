@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlanV2",
+  "type": "object",
+  "required": ["goal", "acceptance_criteria", "candidate_files"],
+  "properties": {
+    "goal": {"type": "string"},
+    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+    "candidate_files": {"type": "array", "items": {"type": "string"}},
+    "tasks": {"type": "array"},
+    "design_branches": {"type": "array"},
+    "risks": {"type": "array"},
+    "test_mapping": {"type": "array"},
+    "verification_profile": {"type": "string"},
+    "planner_confidence": {"type": "number"}
+  },
+  "additionalProperties": true
+}

@@ -436,6 +436,9 @@ class FileStateStore:
             "plan.json",
             "test_plan.json",
             "verification_plan.json",
+            "candidate_decision.json",
+            "committee_plan.json",
+            "committee_reports.json",
             "planning_progress.json",
             "issue.json",
         ):

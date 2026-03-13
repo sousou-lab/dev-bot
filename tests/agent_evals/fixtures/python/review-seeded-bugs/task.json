@@ -1,0 +1,10 @@
+{
+  "task_id": "py-review-001",
+  "language": "python",
+  "fixture_repo": "fixtures/python/review-seeded-bugs/repo",
+  "task_type": "review",
+  "issue_prompt": "Review a patch that accidentally dispatches when Plan is not Approved.",
+  "golden": {
+    "expected_finding_ids": ["R-approval-gate"]
+  }
+}

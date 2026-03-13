@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ImplementationResultV1",
+  "type": "object",
+  "required": ["success", "hard_checks_pass"],
+  "properties": {
+    "success": {"type": "boolean"},
+    "hard_checks_pass": {"type": "boolean"},
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "tests_run": {"type": "array", "items": {"type": "string"}},
+    "followups": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

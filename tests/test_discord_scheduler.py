@@ -1649,14 +1649,16 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client.planning_agent.build_artifacts = MagicMock(
             side_effect=lambda **kwargs: (
+                self.assertEqual(0, kwargs["rework_count"]),
                 kwargs["progress_callback"]({"status": "test_plan_generating", "phase": "overview"}),
                 SimpleNamespace(
                     repo_profile={"repo": "owner/repo"},
                     plan={"steps": ["one"]},
                     test_plan={"checks": []},
                     verification_plan={"profile": "generic-minimal"},
+                    candidate_decision={"enabled": False, "candidate_ids": ["primary"]},
                 ),
-            )[1]
+            )[2]
         )
 
         result = self.client._build_plan_artifacts("owner/repo", thread_id, {"goal": "ship"})
@@ -1668,6 +1670,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual({"steps": ["one"]}, result["plan"])
         self.assertEqual({"profile": "generic-minimal"}, result["verification_plan"])
+        self.assertEqual({"enabled": False, "candidate_ids": ["primary"]}, result["candidate_decision"])
 
     async def test_build_plan_artifacts_replaces_stale_debug_artifacts_with_latest_response(self) -> None:
         thread_id = 321
@@ -1706,6 +1709,32 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(debug_artifacts[0].endswith("test_plan_overview_attempt_0_response.json"))
         payload = json.loads(Path(debug_artifacts[0]).read_text(encoding="utf-8"))
         self.assertEqual("sess_bytes", payload["session_id"])
+
+    async def test_build_plan_artifacts_passes_issue_attempt_count_as_rework_count(self) -> None:
+        thread_id = 321
+        issue_key = "owner/repo#42"
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.state_store.bind_issue(thread_id, "owner/repo", 42)
+        self.state_store.update_issue_meta(issue_key, attempt_count=2)
+        self.client.pipeline.workspace_manager.prepare_plan_workspace = MagicMock(
+            return_value={"workspace": self.tmpdir.name, "base_branch": "main"}
+        )
+        self.client.planning_agent.build_artifacts = MagicMock(
+            side_effect=lambda **kwargs: SimpleNamespace(
+                repo_profile={"repo": "owner/repo"},
+                plan={"steps": ["one"]},
+                test_plan={"checks": []},
+                verification_plan={"profile": "generic-minimal"},
+                candidate_decision={"enabled": True, "candidate_ids": ["primary", "alt1"]},
+                observed_rework_count=kwargs["rework_count"],
+            )
+        )
+
+        result = self.client._build_plan_artifacts("owner/repo", thread_id, {"goal": "ship"})
+
+        self.client.planning_agent.build_artifacts.assert_called_once()
+        self.assertEqual(2, self.client.planning_agent.build_artifacts.call_args.kwargs["rework_count"])
+        self.assertEqual({"enabled": True, "candidate_ids": ["primary", "alt1"]}, result["candidate_decision"])
 
     async def test_generate_plan_failure_records_debug_artifacts_and_traceback(self) -> None:
         thread_id = 321

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 from app.approvals import ApprovalCoordinator
+from app.contracts.workflow_schema import IncidentBundleConfig, WorkflowConfig
 from app.pipeline import DevelopmentPipeline
 from app.process_registry import ProcessRegistry
 from app.state_store import FileStateStore
@@ -65,3 +67,42 @@ class PipelineUnitTests(unittest.TestCase):
             ],
             run_mock.call_args_list,
         )
+
+    def test_sync_runner_generated_artifacts_imports_implementation_result(self) -> None:
+        issue_key = "owner/repo#1"
+        self.state_store.create_issue_record(issue_key)
+        run_id = self.state_store.create_execution_run(issue_key)
+        artifacts_dir = Path(self.tmpdir.name) / "runner-artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        (artifacts_dir / "implementation_result.json").write_text(
+            '{"candidate_id":"primary","summary":"ok","changed_files":["app/x.py"]}',
+            encoding="utf-8",
+        )
+
+        self.pipeline._sync_runner_generated_artifacts(issue_key=issue_key, run_id=run_id, artifacts_dir=artifacts_dir)
+
+        payload = self.state_store.load_artifact(issue_key, "implementation_result.json")
+        self.assertEqual("ok", payload["summary"])
+
+    def test_materialize_and_finalize_incident_bundle(self) -> None:
+        issue_key = "owner/repo#2"
+        self.state_store.create_issue_record(issue_key)
+        run_id = self.state_store.create_execution_run(issue_key)
+        workflow = {"config": WorkflowConfig(incident_bundle=IncidentBundleConfig())}
+
+        bundle_dir = self.pipeline._materialize_incident_bundle(
+            workflow=workflow,
+            issue_key=issue_key,
+            run_id=run_id,
+            workspace="/tmp/work",
+            issue={"title": "Issue"},
+            summary={"goal": "Goal"},
+            plan={"steps": ["one"]},
+            test_plan={"unit": []},
+        )
+        assert bundle_dir is not None
+
+        self.pipeline._finalize_incident_bundle(bundle_dir, issue_key, run_id)
+
+        manifest = self.state_store.load_execution_artifact(issue_key, "incident_bundle_manifest.json", run_id)
+        self.assertEqual(issue_key, manifest["issue_key"])

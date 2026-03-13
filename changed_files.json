@@ -1,9 +1,8 @@
 {
   "changed_files": [
-    "app/agent_sdk_client.py",
-    "app/discord_adapter.py",
-    "tests/fixtures/drafts/1481565649607331942/requirement_summary.json",
-    "tests/test_agent_sdk_client.py",
-    "tests/test_discord_scheduler.py"
+    "app/runners/execution_backend.py",
+    "app/runners/codex_app_server_backend.py",
+    "app/runners/codex_runner.py",
+    "tests/test_codex_runner.py"
   ]
 }
