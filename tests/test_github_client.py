@@ -393,6 +393,31 @@ class GitHubIssueClientTests(unittest.TestCase):
             result,
         )
 
+    def test_create_inline_review_comment_uses_pull_head_sha(self) -> None:
+        client = GitHubIssueClient("token")
+        repo = Mock()
+        pull = Mock()
+        pull.head.sha = "headsha123"
+        pull.create_review_comment.return_value = Mock(id=55, html_url="https://example.invalid/comment/55")
+        repo.get_pull.return_value = pull
+
+        with patch.object(client, "_get_repo", return_value=repo):
+            result = client.create_inline_review_comment(
+                "owner/repo",
+                pr_number=99,
+                path="app/x.py",
+                line=12,
+                body="review body",
+            )
+
+        pull.create_review_comment.assert_called_once_with(
+            body="review body",
+            commit="headsha123",
+            path="app/x.py",
+            line=12,
+        )
+        self.assertEqual({"id": 55, "url": "https://example.invalid/comment/55"}, result)
+
     def test_parse_next_link_returns_next_url(self) -> None:
         link = (
             '<https://api.github.com/installation/repositories?page=2>; rel="next", '

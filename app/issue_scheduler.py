@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 from app.logging_setup import get_logger
@@ -10,6 +10,15 @@ from app.run_request import enqueue_issue_run
 from app.state_store import FileStateStore
 
 logger = get_logger(__name__)
+
+CORE_PLANNING_ARTIFACTS: tuple[str, ...] = (
+    "requirement_summary.json",
+    "plan.json",
+    "test_plan.json",
+)
+
+# Phase 1: observe only. Promote to required after the committee reliably writes it.
+RECOMMENDED_PLANNING_ARTIFACTS: tuple[str, ...] = ("verification_plan.json",)
 
 
 class IssueScheduler:
@@ -263,18 +272,34 @@ class IssueScheduler:
             orchestrator=self.orchestrator,
         )
 
+    def _has_nonempty_json_artifacts(self, thread_id: int, filenames: Iterable[str]) -> tuple[bool, list[str]]:
+        missing: list[str] = []
+        for filename in filenames:
+            payload = self.state_store.load_artifact(thread_id, filename)
+            if not isinstance(payload, dict) or not payload:
+                missing.append(filename)
+        return (len(missing) == 0, missing)
+
     def has_planning_artifacts(self, thread_id: int) -> bool:
-        summary = self.state_store.load_artifact(thread_id, "requirement_summary.json")
-        plan = self.state_store.load_artifact(thread_id, "plan.json")
-        test_plan = self.state_store.load_artifact(thread_id, "test_plan.json")
-        return (
-            isinstance(summary, dict)
-            and bool(summary)
-            and isinstance(plan, dict)
-            and bool(plan)
-            and isinstance(test_plan, dict)
-            and bool(test_plan)
+        ok, missing_required = self._has_nonempty_json_artifacts(thread_id, CORE_PLANNING_ARTIFACTS)
+        if not ok:
+            logger.info(
+                "scheduler skip: core planning artifacts missing for thread=%s missing=%s",
+                thread_id,
+                ",".join(missing_required),
+            )
+            return False
+
+        recommended_ok, missing_recommended = self._has_nonempty_json_artifacts(
+            thread_id, RECOMMENDED_PLANNING_ARTIFACTS
         )
+        if not recommended_ok:
+            logger.info(
+                "scheduler note: recommended planning artifacts missing for thread=%s missing=%s",
+                thread_id,
+                ",".join(missing_recommended),
+            )
+        return True
 
     def _project_enabled(self) -> bool:
         return bool(str(getattr(self.settings, "github_project_id", "")).strip())

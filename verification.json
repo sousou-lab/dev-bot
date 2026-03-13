@@ -1,14 +1,13 @@
 {
   "unit": "pass",
-  "integration": "not_run",
-  "lint": "pass",
-  "typecheck": "pass",
+  "integration": "pass",
+  "lint": "not_run",
+  "typecheck": "not_run",
   "manual_checks": [],
   "notes": [
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run pytest -q tests/test_agent_sdk_client.py tests/test_discord_scheduler.py",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run ruff check app/agent_sdk_client.py app/discord_adapter.py tests/test_agent_sdk_client.py tests/test_discord_scheduler.py",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run ruff format --check app/agent_sdk_client.py app/discord_adapter.py tests/test_agent_sdk_client.py tests/test_discord_scheduler.py",
-    "PASS WITH WARNINGS: UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run pyright app completed with existing repository warnings and no new errors",
-    "NOT RUN: integration and full-suite verification were not re-executed for this scoped diagnostics and fixture-based planning test change"
+    "PASS: uv run python -m pytest tests/test_codex_runner.py tests/test_codex_app_server_backend.py tests/test_pipeline_e2e.py -q",
+    "PASS: uv run python -m pytest -q",
+    "Scope: connected CodexRunner to the ExecutionBackend abstraction, extended CodexAppServerBackend to collect structured completion data, and persisted backend-driven implementation artifacts through the existing runner path.",
+    "Note: changed_files.json records only files touched in this task because the worktree already contains unrelated user changes"
   ]
 }

@@ -2,12 +2,12 @@
   "success": true,
   "state": "Human Review",
   "summary": [
-    "Claude Agent SDK empty/invalid JSON failures now record structured response diagnostics, including per-attempt result metadata and compact event traces.",
-    "Plan generation failure handling persists those diagnostics into last_failure details so /why-failed can distinguish empty end_turn-style responses from upstream API issues.",
-    "A fixture-based planning regression test now replays the draft 1481565649607331942 requirement summary through the /plan path and verifies empty-response detection is recorded."
+    "Connected CodexRunner to the ExecutionBackend abstraction instead of keeping app-server orchestration entirely inline.",
+    "Expanded CodexAppServerBackend so it tracks turn completion, structured output, summaries, raw event logs, and returns runner-usable artifacts.",
+    "Kept the existing CodexRunner result shape while writing implementation_result.json and changed_files.json from backend-collected outputs."
   ],
   "risks": [
-    "The new diagnostics improve classification, but root-cause removal still depends on observing more failing samples from the real Claude SDK/runtime path.",
-    "Pyright still reports pre-existing repository warnings; this change introduced no new type errors."
+    "Candidate mode and turn/steer are still not wired into the outer pipeline control flow; the backend now supports the primitives but the orchestration path still uses single-writer execution.",
+    "lint and typecheck were not rerun for this scoped runtime change."
   ]
 }

@@ -73,7 +73,7 @@ if PYDANTIC_AVAILABLE:
         max_concurrent_runs: int = 5
         codex_bin: str = "codex"
         codex_app_server_command: str = "codex app-server"
-        codex_model: str = "gpt-5-codex"
+        codex_model: str = "gpt-5.4"
         claude_agent_max_buffer_size: int = 5 * 1024 * 1024
         approval_timeout_seconds: int = 900
         scheduler_poll_interval_seconds: int = 15
@@ -146,7 +146,7 @@ if PYDANTIC_AVAILABLE:
                 max_concurrent_runs=_parse_int("MAX_CONCURRENT_RUNS", 5),
                 codex_bin=os.getenv("CODEX_BIN", "codex"),
                 codex_app_server_command=os.getenv("CODEX_APP_SERVER_COMMAND", "codex app-server"),
-                codex_model=os.getenv("CODEX_MODEL", "gpt-5-codex"),
+                codex_model=os.getenv("CODEX_MODEL", "gpt-5.4"),
                 claude_agent_max_buffer_size=_parse_int("CLAUDE_AGENT_MAX_BUFFER_SIZE", 5 * 1024 * 1024),
                 approval_timeout_seconds=_parse_int("APPROVAL_TIMEOUT_SECONDS", 900),
                 scheduler_poll_interval_seconds=_parse_int("SCHEDULER_POLL_INTERVAL_SECONDS", 15),
@@ -201,7 +201,7 @@ else:
             self.max_concurrent_runs = int(kwargs.get("max_concurrent_runs", 5))
             self.codex_bin = str(kwargs.get("codex_bin", "codex"))
             self.codex_app_server_command = str(kwargs.get("codex_app_server_command", "codex app-server")).strip()
-            self.codex_model = str(kwargs.get("codex_model", "gpt-5-codex")).strip()
+            self.codex_model = str(kwargs.get("codex_model", "gpt-5.4")).strip()
             self.claude_agent_max_buffer_size = int(kwargs.get("claude_agent_max_buffer_size", 5 * 1024 * 1024))
             self.approval_timeout_seconds = int(kwargs.get("approval_timeout_seconds", 900))
             self.scheduler_poll_interval_seconds = int(kwargs.get("scheduler_poll_interval_seconds", 15))
@@ -234,7 +234,7 @@ else:
                 max_concurrent_runs=_parse_int("MAX_CONCURRENT_RUNS", 5),
                 codex_bin=os.getenv("CODEX_BIN", "codex"),
                 codex_app_server_command=os.getenv("CODEX_APP_SERVER_COMMAND", "codex app-server"),
-                codex_model=os.getenv("CODEX_MODEL", "gpt-5-codex"),
+                codex_model=os.getenv("CODEX_MODEL", "gpt-5.4"),
                 claude_agent_max_buffer_size=_parse_int("CLAUDE_AGENT_MAX_BUFFER_SIZE", 5 * 1024 * 1024),
                 approval_timeout_seconds=_parse_int("APPROVAL_TIMEOUT_SECONDS", 900),
                 scheduler_poll_interval_seconds=_parse_int("SCHEDULER_POLL_INTERVAL_SECONDS", 15),

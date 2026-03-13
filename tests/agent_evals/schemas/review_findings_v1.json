@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReviewFindingsV1",
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "file", "line_start", "line_end", "claim"],
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {"type": "string"},
+          "file": {"type": "string"},
+          "line_start": {"type": "integer"},
+          "line_end": {"type": "integer"},
+          "claim": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

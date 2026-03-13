@@ -1,0 +1,10 @@
+outputs:
+  AGENTS.md:
+    - docs/policy/core.md
+    - docs/policy/agents.overlay.md
+  CLAUDE.md:
+    - docs/policy/core.md
+    - docs/policy/claude.overlay.md
+  REVIEW.md:
+    - docs/policy/core.md
+    - docs/policy/review.overlay.md

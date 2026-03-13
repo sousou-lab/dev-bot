@@ -9,6 +9,20 @@ from app.config import Settings, validate_settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_codex_model_defaults_to_gpt_5_4(self) -> None:
+        settings = Settings(
+            discord_bot_token="discord",
+            discord_guild_id="guild",
+            discord_status_channel_id="status",
+            workspace_root="/tmp/workspaces",
+            state_dir="/tmp/state",
+            github_app_id="1",
+            github_app_private_key_path=__file__,
+            github_app_installation_id="99",
+        )
+
+        self.assertEqual("gpt-5.4", settings.codex_model)
+
     def test_validate_settings_does_not_require_openai_api_key_for_codex_cli_login(self) -> None:
         settings = Settings(
             openai_api_key="",

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SyntheticTaskV1",
+  "type": "object",
+  "required": ["task_id", "language", "fixture_repo", "task_type", "issue_prompt", "golden"],
+  "properties": {
+    "task_id": {"type": "string"},
+    "language": {"type": "string"},
+    "fixture_repo": {"type": "string"},
+    "task_type": {"type": "string", "enum": ["planning", "review", "implementation"]},
+    "issue_prompt": {"type": "string"},
+    "golden": {"type": "object"}
+  },
+  "additionalProperties": true
+}

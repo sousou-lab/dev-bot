@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from dataclasses import asdict, is_dataclass
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -11,12 +12,15 @@ from typing import Any, Protocol
 
 from app.approvals import ApprovalCoordinator, is_high_risk_command
 from app.config import Settings
+from app.debug.bundle_builder import IncidentBundleBuilder
 from app.github_client import GitHubIssueClient
 from app.process_registry import ProcessRegistry
 from app.proof_of_work import evaluate_proof_of_work
+from app.review.github_poster import GitHubReviewPoster
 from app.runners.claude_runner import ClaudeRunner
 from app.runners.codex_runner import CodexRunner
 from app.state_store import FileStateStore
+from app.telemetry.jsonl import JsonlTelemetrySink
 from app.verification_profiles import workflow_verification_from_plan
 from app.workflow_loader import load_workflow, workflow_text
 from app.workspace_manager import WorkspaceManager
@@ -124,6 +128,13 @@ class DevelopmentPipeline:
         run_log_path = artifacts_dir / "run.log"
         workpad_updates_path = artifacts_dir / "workpad_updates.jsonl"
         self._append_run_log(run_log_path, "run start")
+        self._record_telemetry_event(
+            issue_key=issue_key,
+            run_id=run_id,
+            event="run_started",
+            status="running",
+            provider="dev-bot",
+        )
 
         issue_snapshot = await self._run_blocking(self._load_issue_snapshot, repo_full_name, issue)
         self.state_store.write_execution_artifact(issue_key, "issue_snapshot.json", issue_snapshot, run_id)
@@ -185,12 +196,33 @@ class DevelopmentPipeline:
             branch_name=workspace_info["branch_name"],
             base_branch=workspace_info["base_branch"],
         )
+        self._record_telemetry_event(
+            issue_key=issue_key,
+            run_id=run_id,
+            event="workspace_prepared",
+            status="ok",
+            extra={
+                "workspace": workspace_info["workspace"],
+                "branch_name": workspace_info["branch_name"],
+                "base_branch": workspace_info["base_branch"],
+            },
+        )
 
         workflow = load_workflow(workspace=workspace_info["workspace"])
         if not workflow:
             workflow = load_workflow(repo_root=".")
         workflow = self._resolve_workflow(workflow, verification_plan)
-        self.state_store.write_execution_artifact(issue_key, "workflow.json", workflow, run_id)
+        incident_bundle_dir = self._materialize_incident_bundle(
+            workflow=workflow,
+            issue_key=issue_key,
+            run_id=run_id,
+            workspace=workspace_info["workspace"],
+            issue=issue,
+            summary=summary,
+            plan=plan,
+            test_plan=test_plan,
+        )
+        self.state_store.write_execution_artifact(issue_key, "workflow.json", self._json_safe(workflow), run_id)
         self.state_store.write_execution_artifact(issue_key, "requirement_summary.json", summary, run_id)
         self.state_store.write_execution_artifact(issue_key, "plan.json", plan, run_id)
         self.state_store.write_execution_artifact(issue_key, "test_plan.json", test_plan, run_id)
@@ -252,13 +284,25 @@ class DevelopmentPipeline:
             run_id=run_id,
             details={"returncode": returncode, "mode": codex_result.mode},
         )
+        self._record_telemetry_event(
+            workflow=workflow,
+            issue_key=issue_key,
+            run_id=run_id,
+            event="implementation_finished",
+            status="ok" if returncode == 0 else "failed",
+            provider="codex-app-server",
+            model=self.settings.codex_model,
+            extra={"returncode": returncode, "mode": codex_result.mode},
+        )
         self._append_run_log(run_log_path, f"codex finish rc={returncode}")
+        self._sync_runner_generated_artifacts(issue_key=issue_key, run_id=run_id, artifacts_dir=codex_log_path.parent)
 
         changed_files = {"changed_files": self._detect_changed_files(workspace_info["workspace"])}
         self.state_store.write_execution_artifact(issue_key, "changed_files.json", changed_files, run_id)
         self.state_store.write_artifact(issue_key, "changed_files.json", changed_files)
 
         if returncode != 0:
+            self._finalize_incident_bundle(incident_bundle_dir, issue_key, run_id)
             await self._finalize_failure(
                 issue_key=issue_key,
                 thread_id=thread_id,
@@ -344,6 +388,18 @@ class DevelopmentPipeline:
         self.state_store.write_artifact(issue_key, "verification_summary.json", verification)
         self.state_store.write_execution_artifact(issue_key, "verification.json", verification_json, run_id)
         self.state_store.write_artifact(issue_key, "verification.json", verification_json)
+        self._record_telemetry_event(
+            workflow=workflow,
+            issue_key=issue_key,
+            run_id=run_id,
+            event="verification_finished",
+            status=str(verification.get("status", "unknown")),
+            provider="claude-agent-sdk",
+            extra={
+                "hard_checks_pass": not self._has_failed_hard_checks(command_results),
+                "failure_type": verification.get("failure_type", ""),
+            },
+        )
         if self._has_failed_hard_checks(command_results):
             await self._finalize_failure(
                 issue_key=issue_key,
@@ -401,7 +457,18 @@ class DevelopmentPipeline:
         )
         self.state_store.write_execution_artifact(issue_key, "review_summary.json", review, run_id)
         self.state_store.write_artifact(issue_key, "review_summary.json", review)
+        self.state_store.write_execution_artifact(issue_key, "review_findings.json", review, run_id)
+        self.state_store.write_artifact(issue_key, "review_findings.json", review)
+        self._record_telemetry_event(
+            workflow=workflow,
+            issue_key=issue_key,
+            run_id=run_id,
+            event="review_finished",
+            status=str(review.get("decision", "unknown")),
+            provider="claude-agent-sdk",
+        )
         if review.get("decision") == "reject":
+            self._finalize_incident_bundle(incident_bundle_dir, issue_key, run_id)
             await self._finalize_failure(
                 issue_key=issue_key,
                 thread_id=thread_id,
@@ -429,6 +496,7 @@ class DevelopmentPipeline:
             {"success": True, "state": "Human Review"},
             run_id,
         )
+        self._finalize_incident_bundle(incident_bundle_dir, issue_key, run_id)
         proof = evaluate_proof_of_work(
             workflow,
             {
@@ -436,12 +504,17 @@ class DevelopmentPipeline:
                 "requirement_summary.json",
                 "plan.json",
                 "test_plan.json",
+                "verification_plan.json",
                 "changed_files.json",
+                "implementation_result.json",
+                "review_findings.json",
                 "verification.json",
                 "final_summary.json",
                 "run.log",
                 "workpad_updates.jsonl",
                 "runner_metadata.json",
+                "incident_bundle_manifest.json",
+                "incident_bundle_summary.md",
             },
         )
         if not proof.complete:
@@ -473,6 +546,7 @@ class DevelopmentPipeline:
             int(issue["number"]),
         )
         if not pushed:
+            self._finalize_incident_bundle(incident_bundle_dir, issue_key, run_id)
             await self._finalize_failure(
                 issue_key=issue_key,
                 thread_id=thread_id,
@@ -524,6 +598,12 @@ class DevelopmentPipeline:
             int(pr["number"]),
         )
         pr["draft"] = False
+        await self._post_inline_review_comments(
+            workflow=workflow,
+            repo_full_name=repo_full_name,
+            pr_number=int(pr["number"]),
+            review=review,
+        )
         self.state_store.write_artifact(issue_key, "pr.json", pr)
         self.state_store.write_execution_artifact(issue_key, "pr.json", pr, run_id)
         comment_body = self._build_pr_comment(channel_url, verification, review, command_results)
@@ -560,6 +640,14 @@ class DevelopmentPipeline:
             status="completed",
             run_id=run_id,
             details={"pr_number": pr["number"], "pr_url": pr["url"]},
+        )
+        self._record_telemetry_event(
+            workflow=workflow,
+            issue_key=issue_key,
+            run_id=run_id,
+            event="run_finished",
+            status="ok",
+            extra={"pr_number": pr["number"], "pr_url": pr["url"]},
         )
         await self._run_blocking(
             self._update_issue_tracking,
@@ -630,6 +718,13 @@ class DevelopmentPipeline:
             run_id=run_id,
             details=extra,
         )
+        self._record_telemetry_event(
+            issue_key=issue_key,
+            run_id=run_id,
+            event="run_failed",
+            status=state,
+            extra={"failure_type": failure_type, **extra},
+        )
         await self._run_blocking(
             self._update_issue_tracking,
             repo_full_name,
@@ -651,6 +746,123 @@ class DevelopmentPipeline:
             ),
             workpad_updates_path,
         )
+
+    def _sync_runner_generated_artifacts(self, *, issue_key: str, run_id: str, artifacts_dir: Path) -> None:
+        for filename in ("implementation_result.json", "changed_files.json"):
+            path = artifacts_dir / filename
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            self.state_store.write_execution_artifact(issue_key, filename, payload, run_id)
+            self.state_store.write_artifact(issue_key, filename, payload)
+
+    def _incident_bundle_enabled(self, workflow: dict[str, Any]) -> bool:
+        config = workflow.get("config")
+        incident_bundle = getattr(config, "incident_bundle", None)
+        return bool(getattr(incident_bundle, "enabled", False))
+
+    def _materialize_incident_bundle(
+        self,
+        *,
+        workflow: dict[str, Any],
+        issue_key: str,
+        run_id: str,
+        workspace: str,
+        issue: dict[str, Any],
+        summary: dict[str, Any],
+        plan: dict[str, Any],
+        test_plan: dict[str, Any],
+    ) -> Path | None:
+        if not self._incident_bundle_enabled(workflow):
+            return None
+        builder = IncidentBundleBuilder(self.state_store.execution_run_dir(issue_key, run_id))
+        payload = {
+            "summary.md": "\n".join(
+                [
+                    f"Issue: {issue_key}",
+                    f"Workspace: {workspace}",
+                    f"Title: {issue.get('title', '')}",
+                    f"Goal: {summary.get('goal', '')}",
+                ]
+            ),
+            "issue_snapshot.json": issue,
+            "requirement_summary.json": summary,
+            "plan.json": plan,
+            "test_plan.json": test_plan,
+        }
+        return builder.materialize(issue_key, run_id, payload)
+
+    def _finalize_incident_bundle(self, bundle_dir: Path | None, issue_key: str, run_id: str) -> None:
+        if bundle_dir is None or not bundle_dir.exists():
+            return
+        builder = IncidentBundleBuilder(self.state_store.execution_run_dir(issue_key, run_id))
+        builder.freeze(bundle_dir)
+        builder.cleanup_keep_provenance(bundle_dir, self.state_store.execution_artifacts_dir(issue_key, run_id))
+
+    async def _post_inline_review_comments(
+        self,
+        *,
+        workflow: dict[str, Any],
+        repo_full_name: str,
+        pr_number: int,
+        review: dict[str, Any],
+    ) -> None:
+        if not self._review_inline_comments_enabled(workflow):
+            return
+        findings = review.get("postable_findings")
+        if not isinstance(findings, list) or not findings:
+            return
+        poster = GitHubReviewPoster(self.github_client)
+        await poster.post_inline(
+            pr_number=pr_number,
+            repo_full_name=repo_full_name,
+            findings=self._coerce_review_findings(findings),
+        )
+
+    def _review_inline_comments_enabled(self, workflow: dict[str, Any]) -> bool:
+        config = workflow.get("config")
+        review = getattr(config, "review", None)
+        return bool(getattr(review, "post_inline_to_github", False))
+
+    def _coerce_review_findings(self, findings: list[dict[str, Any]]) -> Any:
+        from app.contracts.artifact_models import ReviewFinding, ReviewFindingsV1
+
+        normalized: list[ReviewFinding] = []
+        for item in findings:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(
+                ReviewFinding(
+                    id=str(item.get("id", "")).strip(),
+                    severity=str(item.get("severity", "")).strip(),
+                    origin=str(item.get("origin", "")).strip(),
+                    confidence=float(item.get("confidence", 0.0)),
+                    file=str(item.get("file", "")).strip(),
+                    line_start=int(item.get("line_start", 0)),
+                    line_end=int(item.get("line_end", 0)),
+                    claim=str(item.get("claim", "")).strip(),
+                    evidence=[str(entry) for entry in item.get("evidence", []) if str(entry).strip()],
+                    verifier_status=str(item.get("verifier_status", "unverified")).strip() or "unverified",
+                    suggested_fix=(str(item["suggested_fix"]) if item.get("suggested_fix") is not None else None),
+                )
+            )
+        return ReviewFindingsV1(findings=normalized)
+
+    def _json_safe(self, value: Any) -> Any:
+        if is_dataclass(value):
+            return self._json_safe(asdict(value))
+        if isinstance(value, dict):
+            return {str(key): self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
 
     async def execute_workflow_commands(
         self,
@@ -1017,3 +1229,47 @@ class DevelopmentPipeline:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _record_telemetry_event(
+        self,
+        *,
+        issue_key: str,
+        run_id: str,
+        event: str,
+        status: str,
+        workflow: dict[str, Any] | None = None,
+        candidate_id: str | None = None,
+        role: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        duration_ms: int | None = None,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if not self._telemetry_enabled(workflow):
+            return
+        sink = JsonlTelemetrySink(self.state_store.execution_artifacts_dir(issue_key, run_id) / "telemetry" / "events.jsonl")
+        sink.write_event(
+            event=event,
+            issue_key=issue_key,
+            run_id=run_id,
+            status=status,
+            candidate_id=candidate_id,
+            role=role,
+            provider=provider,
+            model=model,
+            duration_ms=duration_ms,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            extra=extra,
+        )
+
+    def _telemetry_enabled(self, workflow: dict[str, Any] | None) -> bool:
+        if workflow is None:
+            return True
+        config = workflow.get("config") if isinstance(workflow, dict) else None
+        telemetry = getattr(config, "telemetry", None)
+        if telemetry is None:
+            return True
+        return str(getattr(telemetry, "sink", "jsonl")).strip() == "jsonl"

@@ -8,7 +8,16 @@ from typing import Any
 
 from app.agent_sdk_client import ClaudeAgentClient
 from app.config import Settings
+from app.contracts.artifact_models import PlanV2
+from app.contracts.workflow_schema import CommitteeRoleConfig, PlanningConfig
+from app.implementation.candidate_policy import CandidateDecision, decide_candidates
+from app.planning.committee import PlannerCommittee
+from app.planning.roles.constraint_checker import ConstraintChecker
+from app.planning.roles.plan_merger import PlanMerger
+from app.planning.roles.repo_explorer import RepoExplorer
+from app.planning.roles.risk_test_planner import RiskTestPlanner
 from app.verification_profiles import build_verification_plan
+from app.workflow_loader import load_workflow_definition
 
 READ_ONLY_TOOLS = [
     "Read",
@@ -264,6 +273,9 @@ class PlanningArtifacts:
     plan: dict[str, Any]
     test_plan: dict[str, Any]
     verification_plan: dict[str, Any]
+    candidate_decision: dict[str, Any] | None = None
+    committee_plan: dict[str, Any] | None = None
+    committee_reports: dict[str, Any] | None = None
 
 
 class PlanningAgent:
@@ -276,12 +288,25 @@ class PlanningAgent:
         workspace: str,
         summary: dict[str, Any],
         repo_profile: dict[str, Any],
+        rework_count: int = 0,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         debug_recorder: Callable[[dict[str, Any]], None] | None = None,
     ) -> PlanningArtifacts:
         if not self._has_plannable_summary(summary):
             raise ValueError(
                 "requirement_summary.json に planning に必要な goal / in_scope / acceptance_criteria が不足しています。"
+            )
+        workflow_definition = load_workflow_definition(workspace=workspace, repo_root=".")
+        planning_config = (
+            workflow_definition.config.planning if workflow_definition and workflow_definition.config else None
+        )
+        if workflow_definition is not None and planning_config is not None and planning_config.mode == "committee":
+            return self._build_committee_artifacts(
+                workspace=workspace,
+                summary=summary,
+                repo_profile=repo_profile,
+                rework_count=rework_count,
+                planning_config=planning_config,
             )
         client = ClaudeAgentClient(
             api_key=self.settings.anthropic_api_key,
@@ -329,7 +354,174 @@ class PlanningAgent:
             plan=plan,
             test_plan=test_plan,
             verification_plan=verification_plan,
+            candidate_decision=_candidate_decision_to_json(CandidateDecision(enabled=False, candidate_ids=["primary"])),
         )
+
+    def _build_committee_artifacts(
+        self,
+        *,
+        workspace: str,
+        summary: dict[str, Any],
+        repo_profile: dict[str, Any],
+        rework_count: int,
+        planning_config: PlanningConfig | None,
+    ) -> PlanningArtifacts:
+        committee = self._create_planner_committee(planning_config=planning_config)
+        issue_ctx = _CommitteeIssueContext(
+            issue_key="planning/local#0",
+            repo_root=workspace,
+            workpad_text=json.dumps(summary, ensure_ascii=False, indent=2),
+            issue_body=self._build_committee_issue_body(summary),
+            acceptance_hints=[str(item) for item in summary.get("acceptance_criteria", []) if str(item).strip()],
+            extra_docs=self._build_committee_extra_docs(repo_profile),
+        )
+        bundle = _run_async(committee.build_plan(issue_ctx))
+        plan = self._committee_plan_to_legacy(bundle.merged)
+        test_plan = self._committee_test_plan_to_legacy(bundle.merged)
+        verification_plan = build_verification_plan(workspace=workspace, repo_profile=repo_profile, plan=plan)
+        candidate_decision = decide_candidates(bundle.merged, rework_count)
+        return PlanningArtifacts(
+            repo_profile=repo_profile,
+            plan=plan,
+            test_plan=test_plan,
+            verification_plan=verification_plan,
+            candidate_decision=_candidate_decision_to_json(candidate_decision),
+            committee_plan=_plan_v2_to_json(bundle.merged),
+            committee_reports={
+                "repo": _to_jsonable(bundle.repo),
+                "risk": _to_jsonable(bundle.risk),
+                "constraint": _to_jsonable(bundle.constraint),
+            },
+        )
+
+    def _create_planner_committee(self, *, planning_config: PlanningConfig | None = None) -> PlannerCommittee:
+        client = ClaudeAgentClient(
+            api_key=self.settings.anthropic_api_key,
+            timeout_seconds=float(300),
+            max_buffer_size=self.settings.claude_agent_max_buffer_size,
+        )
+        role_configs = planning_config.committee.roles if planning_config and planning_config.committee else {}
+        return PlannerCommittee(
+            repo_explorer=RepoExplorer(
+                client=client,
+                **self._planner_role_kwargs(planning_config, role_configs.get("repo_explorer")),
+            ),
+            risk_test_planner=RiskTestPlanner(
+                client=client,
+                **self._planner_role_kwargs(planning_config, role_configs.get("risk_test_planner")),
+            ),
+            constraint_checker=ConstraintChecker(
+                client=client,
+                **self._planner_role_kwargs(planning_config, role_configs.get("constraint_checker")),
+            ),
+            merger=PlanMerger(
+                client=client,
+                **self._planner_role_kwargs(planning_config, role_configs.get("merger")),
+            ),
+        )
+
+    def _build_committee_issue_body(self, summary: dict[str, Any]) -> str:
+        lines = [
+            f"Goal: {summary.get('goal', '')}",
+            "",
+            "In scope:",
+            *[f"- {item}" for item in summary.get("in_scope", []) if str(item).strip()],
+            "",
+            "Acceptance criteria:",
+            *[f"- {item}" for item in summary.get("acceptance_criteria", []) if str(item).strip()],
+            "",
+            "Constraints:",
+            *[f"- {item}" for item in summary.get("constraints", []) if str(item).strip()],
+        ]
+        return "\n".join(lines).strip()
+
+    def _build_committee_extra_docs(self, repo_profile: dict[str, Any]) -> list[str]:
+        docs: list[str] = []
+        profiler_notes = repo_profile.get("notes", [])
+        if isinstance(profiler_notes, list):
+            docs.extend(str(item) for item in profiler_notes if str(item).strip())
+        files = repo_profile.get("files", [])
+        if isinstance(files, list):
+            docs.extend(str(item) for item in files[:5] if str(item).strip())
+        return docs
+
+    def _planner_role_kwargs(
+        self,
+        planning_config: PlanningConfig | None,
+        role_config: CommitteeRoleConfig | None,
+    ) -> dict[str, Any]:
+        allowed_tools = (
+            list(planning_config.allowed_tools)
+            if planning_config and planning_config.allowed_tools
+            else [
+                "Read",
+                "Grep",
+                "Glob",
+            ]
+        )
+        if role_config and role_config.allowed_tools:
+            allowed_tools = list(role_config.allowed_tools)
+        if role_config and role_config.disallowed_tools:
+            blocked = set(role_config.disallowed_tools)
+            allowed_tools = [tool for tool in allowed_tools if tool not in blocked]
+        setting_sources = list(planning_config.settings_sources) if planning_config else ["project"]
+        return {
+            "allowed_tools": allowed_tools,
+            "setting_sources": setting_sources,
+            "permission_mode": "default",
+        }
+
+    def _committee_plan_to_legacy(self, plan_v2: PlanV2) -> dict[str, Any]:
+        return {
+            "goal": plan_v2.goal,
+            "scope": [task.summary for task in plan_v2.tasks],
+            "assumptions": list(plan_v2.constraints),
+            "candidate_files": list(plan_v2.candidate_files),
+            "implementation_steps": [task.summary for task in plan_v2.tasks],
+            "verification_steps": [f"Validate {item.criterion}" for item in plan_v2.test_mapping],
+            "risks": [item.risk for item in plan_v2.risks],
+            "high_risk_changes": [branch.summary for branch in plan_v2.design_branches[1:]],
+        }
+
+    def _committee_test_plan_to_legacy(self, plan_v2: PlanV2) -> dict[str, Any]:
+        cases: list[dict[str, Any]] = []
+        for index, mapping in enumerate(plan_v2.test_mapping, start=1):
+            names = mapping.tests or [mapping.criterion]
+            for subindex, test_name in enumerate(names, start=1):
+                cases.append(
+                    {
+                        "id": f"TS-{index:02d}-TC-{subindex:02d}",
+                        "target": test_name,
+                        "name": mapping.criterion,
+                        "category": "regression",
+                        "priority": "p1",
+                        "acceptance_criteria_refs": [mapping.criterion],
+                        "preconditions": [],
+                        "inputs": [],
+                        "steps": [f"Run {test_name}"],
+                        "expected": [f"{mapping.criterion} is satisfied"],
+                        "failure_mode": mapping.criterion,
+                        "notes": [],
+                    }
+                )
+        return {
+            "test_targets": [item for mapping in plan_v2.test_mapping for item in mapping.tests]
+            or plan_v2.candidate_files,
+            "strategy": {"unit": [], "integration": [], "e2e": [], "mocking": []},
+            "cases": cases,
+            "regression_risks": [item.risk for item in plan_v2.risks],
+            "risks": [
+                {
+                    "title": item.risk,
+                    "severity": "medium",
+                    "likelihood": "medium",
+                    "impact": item.risk,
+                    "mitigation": item.mitigation,
+                    "detection": "verification",
+                }
+                for item in plan_v2.risks
+            ],
+        }
 
     def _has_plannable_summary(self, summary: dict[str, Any]) -> bool:
         goal = str(summary.get("goal", "")).strip()
@@ -571,3 +763,69 @@ def _renumber_test_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cloned["id"] = f"TS-{target_number:02d}-TC-{case_counter_by_target[target_number]:02d}"
         renumbered.append(cloned)
     return renumbered
+
+
+@dataclass(frozen=True)
+class _CommitteeIssueContext:
+    issue_key: str
+    repo_root: str
+    workpad_text: str
+    issue_body: str
+    acceptance_hints: list[str]
+    extra_docs: list[str]
+
+
+def _run_async(coro: Any) -> Any:
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError(f"Planner committee cannot run inside active event loop: {loop}")
+
+
+def _to_jsonable(value: Any) -> dict[str, Any]:
+    from dataclasses import asdict, is_dataclass
+
+    if is_dataclass(value):
+        data = asdict(value)
+        return data if isinstance(data, dict) else {"value": data}
+    if isinstance(value, dict):
+        return value
+    return {"value": value}
+
+
+def _plan_v2_to_json(plan_v2: PlanV2) -> dict[str, Any]:
+    return {
+        "goal": plan_v2.goal,
+        "acceptance_criteria": list(plan_v2.acceptance_criteria),
+        "out_of_scope": list(plan_v2.out_of_scope),
+        "constraints": list(plan_v2.constraints),
+        "candidate_files": list(plan_v2.candidate_files),
+        "tasks": [
+            {"id": task.id, "summary": task.summary, "files": list(task.files), "done_when": task.done_when}
+            for task in plan_v2.tasks
+        ],
+        "design_branches": [
+            {
+                "id": branch.id,
+                "summary": branch.summary,
+                "pros": list(branch.pros),
+                "cons": list(branch.cons),
+                "recommended": branch.recommended,
+            }
+            for branch in plan_v2.design_branches
+        ],
+        "risks": [{"risk": item.risk, "mitigation": item.mitigation} for item in plan_v2.risks],
+        "test_mapping": [{"criterion": item.criterion, "tests": list(item.tests)} for item in plan_v2.test_mapping],
+        "verification_profile": plan_v2.verification_profile,
+        "planner_confidence": plan_v2.planner_confidence,
+    }
+
+
+def _candidate_decision_to_json(decision: CandidateDecision) -> dict[str, Any]:
+    return {
+        "enabled": decision.enabled,
+        "candidate_ids": list(decision.candidate_ids),
+    }

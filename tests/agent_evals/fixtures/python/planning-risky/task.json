@@ -1,0 +1,17 @@
+{
+  "task_id": "py-planning-002",
+  "language": "python",
+  "fixture_repo": "fixtures/python/planning-risky/repo",
+  "task_type": "planning",
+  "issue_prompt": "Change workspace identity without touching protected secret handling paths.",
+  "golden": {
+    "acceptance_criteria": [
+      "Workspace key is issue-based",
+      "Secret handling stays out of scope"
+    ],
+    "candidate_files": [
+      "app/workspace_manager.py",
+      "tests/test_workspace_manager.py"
+    ]
+  }
+}
