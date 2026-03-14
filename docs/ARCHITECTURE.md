@@ -19,7 +19,8 @@
 
 ## Runtime Model
 - workspace key: `{owner}/{repo}#{issue_number}`
-- per-issue workspace を再利用し、retry / recovery 時も同じ worktree を使う
+- planning artifacts は issue 単位で保持し、execution は `attempt -> candidate` 単位の worktree へ分離する
+- bare mirror は issue 単位で共有するが、実装 workspace は `attempt_id` / `candidate_id` ごとに独立させる
 - 永続 source は GitHub issue workpad と filesystem artifacts
 - DB なしでも再開できる構成を優先する
 
@@ -38,10 +39,22 @@
 - `issue_snapshot.json`
 - `requirement_summary.json`
 - `plan.json`
+- `plan_v2.json`
 - `test_plan.json`
 - `verification_plan.json`
+- `candidate_decision.json`
+- `scope_contract.json`
+- `attempt_manifest.json`
+- `winner_selection.json`
+- `final_attempt_summary.json`
 - `verification.json`
+- `review_summary.json`
+- `review_result.json`
+- `scope_analysis.json`
 - `changed_files.json`
+- `proof_result.json`
+- `session_checkpoint.json`
+- `session_handoff_bundle.json`
 - `final_summary.json`
 - `run.log`
 - `discord_events.jsonl`
@@ -65,16 +78,16 @@
    - Claude は planning のみ、Codex は implementation のみを担う。
 8. Codex は会話履歴ではなく planning artifacts を契約として受け取る
    - 実装時に参照するのは `goal`、`acceptance_criteria`、`constraints`、`out_of_scope`、`plan`、`test_plan`、`WORKFLOW.md` とする。
-9. runtime の主キーは `issue_key + run_id` とする
-   - 実行、retry、restore、workspace、artifact は issue 単位で管理し、各試行は run 単位で分ける。
+9. runtime の canonical unit は `attempt` と `candidate` にする
+   - issue は scheduler の主語、attempt は試行の正本、candidate は実装探索の単位として管理する。
 10. Discord thread は `1 issue : 1 thread` の binding として扱う
    - thread は UI 上の窓口であり、runtime の主語にはしない。
 11. issue 化前は `DraftWorkItem` を持つ
    - Discord 上の要件対話は draft として保存し、approve 後に issue work item へ昇格させる。
-12. retry は resume ではなく新しい試行として扱う
-   - 同一 issue の再実行では新しい `run_id` を切り、履歴を混ぜない。
-13. `thread/resume` は crash recovery 専用とする
-   - 通常の `Rework` や人間起点の再実行では使わず、同一 `run_id` の異常終了復旧に限定する。
+12. retry は原則 new attempt として扱う
+   - 同一 issue の再実行では新しい `attempt_id` を切り、winner 判定と履歴を混ぜない。
+13. session resume は crash recovery 専用とする
+   - 通常の `Rework` や repair 継続では handoff bundle を書いて new session を開始する。
 
 ## State And Plan Semantics
 ### Execution Gate
@@ -84,7 +97,7 @@
 ### State Meanings
 - `Backlog`: 手動で積まれた未着手 issue。通常の Discord 起点フローはこの state を経由しなくてよい
 - `Ready`: plan 承認済みで bot が着手してよい
-- `In Progress`: bot 実行中。新しい run を重ねて開始してはいけない
+- `In Progress`: bot 実行中。新しい attempt を重ねて開始してはいけない
 - `Human Review`: bot の実装と検証が終わり、人間の確認待ち
 - `Rework`: bot が再試行してよい修正待ち
 - `Merging`: 人間承認済みで agent が land 中
@@ -148,29 +161,36 @@
 - pre-issue 段階は `DraftWorkItem` を持つ
 - post-issue 段階は `IssueWorkItem` を持つ
 - runtime 主キーは `issue_key`
-- 各試行は `run_id` で区別する
+- 各試行は `attempt_id`、実装候補は `candidate_id` で区別する
 - Discord thread は `thread_id <-> issue_key` の binding を持つが、runtime 主キーにはしない
 
 ### Runtime Rules
-- retry は同一 issue に対する新しい試行であり、毎回新しい `run_id` を発行する
-- `thread/resume` は同一 `run_id` の crash recovery にだけ使う
-- `Rework` や差し戻し後の再実行では `thread/resume` を使わず、新しい run を開始する
-- abort は current run を停止し、通常は issue を `Blocked` に遷移させる
-- restore は run 再開ではなく state 整合処理として扱う
+- retry は同一 issue に対する新しい試行であり、毎回新しい `attempt_id` を発行する
+- `thread/resume` は同一 attempt / session の crash recovery にだけ使う
+- `Rework` や差し戻し後の再実行では `thread/resume` を使わず、新しい attempt を開始する
+- abort は current attempt を停止し、通常は issue を `Blocked` に遷移させる
+- restore は attempt 再開ではなく state 整合処理として扱う
 - `In Progress` で process 不在なら `Rework` に落とす
 - `Merging` で整合が取れなければ `Blocked` に落とす
+
+## Execution Artifact Model
+- planning の正本は `planning/plan_v2.json` と `planning/committee_bundle.json`
+- execution の正本は `attempts/{attempt_id}/artifacts/attempt_manifest.json`
+- candidate ごとの実装結果は `attempts/{attempt_id}/candidates/{candidate_id}/artifacts/` に保持する
+- winner 確定後のみ `views/` と issue latest artifacts を更新する
+- repair 継続や compact 前には `session_checkpoint.json` と `session_handoff_bundle.json` を書く
 
 ## Scheduler Model
 ### Core Responsibilities
 - `dispatch pass`: `Ready` / `Rework` を新規実行に乗せる
-- `reconcile pass`: `In Progress` の process / run 整合を確認する
+- `reconcile pass`: `In Progress` の process / attempt 整合を確認する
 - `merge pass`: `Merging` の完了確認と不整合検出を行う
 
 ### Scheduler Rules
 - scheduler は GitHub Projects v2 の `State` / `Plan` を見て判断する
 - Discord は dispatch の起点ではなく state 変更 UI として扱う
 - Discord 操作後は即時 tick のヒントを出してよいが、最終判定は常に GitHub を見る
-- 同一 `issue_key` に active run は常に 1 つまでとする
+- 同一 `issue_key` に active attempt は常に 1 つまでとする
 
 ## Verification Model
 - repo に `WORKFLOW.md` があれば、その `verification.required_checks` を最優先する
@@ -189,7 +209,7 @@
 - issue 作成後の後続処理に失敗した場合、draft は `promotion_failed` として保持し、issue URL や `issue_key` を参照できるようにする
 - 二重起動防止は多層で行う
   - GitHub の `State` / `Plan` gate
-  - active run の存在確認
+  - active attempt の存在確認
   - `issue_key` 単位のロック
 - dispatch の取りこぼしは次回 poll で回収できる設計にする
 - restore は賢すぎる推測をしない

@@ -1404,6 +1404,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.state_store.write_artifact(321, "requirement_summary.json", {"goal": "ship"})
         self.state_store.write_artifact(321, "plan.json", {"steps": ["one"]})
         self.state_store.write_artifact(321, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.write_artifact(321, "verification_plan.json", {"required_checks": []})
         self.client.process_registry.register(issue_key, "run-1", pid=999999, runner_type="codex")
         enqueue_mock = AsyncMock(return_value=True)
         self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
@@ -1442,6 +1443,7 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.state_store.write_artifact(321, "requirement_summary.json", {"goal": "ship"})
         self.state_store.write_artifact(321, "plan.json", {"steps": ["one"]})
         self.state_store.write_artifact(321, "test_plan.json", {"checks": ["tests"]})
+        self.state_store.write_artifact(321, "verification_plan.json", {"required_checks": []})
         enqueue_mock = AsyncMock(return_value=True)
         self.client.orchestrator.enqueue = enqueue_mock  # type: ignore[method-assign]
 
