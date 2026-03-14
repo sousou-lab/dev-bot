@@ -25,7 +25,7 @@ class GitHubReviewPoster:
             if repo_full_name:
                 try:
                     signature = inspect.signature(self.github_client.create_inline_review_comment)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     signature = None
                 if signature is not None and "repo_full_name" in signature.parameters:
                     kwargs["repo_full_name"] = repo_full_name
