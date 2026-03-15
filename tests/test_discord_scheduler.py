@@ -1692,6 +1692,58 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"profile": "generic-minimal"}, result["verification_plan"])
         self.assertEqual({"enabled": False, "candidate_ids": ["primary"]}, result["candidate_decision"])
 
+    async def test_build_plan_artifacts_progress_does_not_roll_back_for_out_of_order_chunk_events(self) -> None:
+        thread_id = 654
+        self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)
+        self.client.pipeline.workspace_manager.prepare_plan_workspace = MagicMock(
+            return_value={"workspace": self.tmpdir.name, "base_branch": "main"}
+        )
+
+        def _side_effect(**kwargs):
+            kwargs["progress_callback"](
+                {
+                    "status": "test_plan_generating",
+                    "phase": "acceptance_criterion",
+                    "current": 2,
+                    "total": 3,
+                    "acceptance_criterion": "ac2",
+                    "message": "chunk 2 running",
+                    "last_event_at": "2026-03-16T00:00:02Z",
+                    "last_event_kind": "AssistantMessage",
+                    "session_id": "sess-2",
+                }
+            )
+            kwargs["progress_callback"](
+                {
+                    "status": "test_plan_generating",
+                    "phase": "acceptance_criterion_completed",
+                    "current": 1,
+                    "total": 3,
+                    "acceptance_criterion": "ac1",
+                    "message": "chunk 1 done",
+                    "last_event_at": "2026-03-16T00:00:03Z",
+                    "last_event_kind": "completed",
+                    "session_id": "sess-1",
+                }
+            )
+            return SimpleNamespace(
+                repo_profile={"repo": "owner/repo"},
+                plan={"steps": ["one"]},
+                test_plan={"checks": []},
+                verification_plan={"profile": "generic-minimal"},
+                candidate_decision={"enabled": False, "candidate_ids": ["primary"]},
+            )
+
+        self.client.planning_agent.build_artifacts = MagicMock(side_effect=_side_effect)
+
+        self.client._build_plan_artifacts("owner/repo", thread_id, {"goal": "ship"})
+
+        planning_progress = self.state_store.load_artifact(thread_id, "planning_progress.json")
+        self.assertEqual(2, planning_progress["current"])
+        self.assertEqual("ac2", planning_progress["acceptance_criterion"])
+        self.assertEqual("sess-2", planning_progress["last_session_id"])
+        self.assertCountEqual(["sess-2", "sess-1"], planning_progress["session_ids"])
+
     async def test_build_plan_artifacts_replaces_stale_debug_artifacts_with_latest_response(self) -> None:
         thread_id = 321
         self.state_store.create_run(thread_id=thread_id, parent_message_id=1, channel_id=2)

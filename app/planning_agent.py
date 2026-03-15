@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -682,7 +682,7 @@ class PlanningAgent:
         repo_profile: dict[str, Any],
     ) -> str:
         if planning_config is not None:
-            mode = str(planning_config.mode or "auto").strip() or "auto"
+            mode = str(planning_config.mode or "committee").strip() or "committee"
             if mode != "auto":
                 return mode
             if self._should_autoselect_committee(
@@ -1008,6 +1008,10 @@ class PlanningAgent:
                 }
             )
 
+        task_specs = [
+            {"index": index, "acceptance": acceptance} for index, acceptance in enumerate(acceptance_items, start=1)
+        ]
+
         if parallelism == 1:
             case_chunks = [
                 self._build_test_plan_chunk(
@@ -1015,41 +1019,77 @@ class PlanningAgent:
                     workspace=workspace,
                     seed_context=seed_context,
                     overview=overview,
-                    acceptance=acceptance,
-                    index=index,
+                    acceptance=str(spec["acceptance"]),
+                    index=int(spec["index"]),
                     total=len(acceptance_items),
                     planning_config=planning_config,
                     progress_callback=progress_callback,
                     debug_recorder=debug_recorder,
                     overview_session_id=overview_result.session_id,
                 )
-                for index, acceptance in enumerate(acceptance_items, start=1)
+                for spec in task_specs
             ]
         else:
+            chunks_by_index: dict[int, dict[str, Any]] = {}
+            failed_specs: list[dict[str, Any]] = []
+            failure_exc: Exception | None = None
+            executor = ThreadPoolExecutor(max_workers=parallelism)
             try:
-                chunks_by_index: dict[int, dict[str, Any]] = {}
-                with ThreadPoolExecutor(max_workers=parallelism) as executor:
-                    future_to_index = {
-                        executor.submit(
-                            self._build_test_plan_chunk,
-                            client=client,
-                            workspace=workspace,
-                            seed_context=seed_context,
-                            overview=overview,
-                            acceptance=acceptance,
-                            index=index,
-                            total=len(acceptance_items),
-                            planning_config=planning_config,
-                            progress_callback=progress_callback,
-                            debug_recorder=debug_recorder,
-                            overview_session_id=overview_result.session_id,
-                        ): index
-                        for index, acceptance in enumerate(acceptance_items, start=1)
-                    }
-                    for future in as_completed(future_to_index):
-                        chunks_by_index[future_to_index[future]] = future.result()
-                case_chunks = [chunks_by_index[index] for index in range(1, len(acceptance_items) + 1)]
+                pending: dict[Any, dict[str, Any]] = {}
+                spec_iter = iter(task_specs)
+
+                def _submit_next() -> bool:
+                    try:
+                        spec = next(spec_iter)
+                    except StopIteration:
+                        return False
+                    future = executor.submit(
+                        self._build_test_plan_chunk,
+                        client=client,
+                        workspace=workspace,
+                        seed_context=seed_context,
+                        overview=overview,
+                        acceptance=str(spec["acceptance"]),
+                        index=int(spec["index"]),
+                        total=len(acceptance_items),
+                        planning_config=planning_config,
+                        progress_callback=progress_callback,
+                        debug_recorder=debug_recorder,
+                        overview_session_id=overview_result.session_id,
+                    )
+                    pending[future] = spec
+                    return True
+
+                for _ in range(parallelism):
+                    if not _submit_next():
+                        break
+
+                while pending:
+                    done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+                    for future in done:
+                        spec = pending.pop(future)
+                        try:
+                            chunks_by_index[int(spec["index"])] = future.result()
+                        except Exception as exc:
+                            failure_exc = exc
+                            failed_specs.append(spec)
+                            failed_specs.extend(pending.values())
+                            for pending_future in pending:
+                                pending_future.cancel()
+                            pending.clear()
+                            break
+                        if not _submit_next():
+                            continue
+                    if failure_exc is not None:
+                        break
+                executor.shutdown(wait=True, cancel_futures=True)
             except Exception as exc:
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise exc
+            if failure_exc is not None:
+                remaining_by_index = {
+                    int(spec["index"]): spec for spec in task_specs if int(spec["index"]) not in chunks_by_index
+                }
                 if progress_callback is not None:
                     progress_callback(
                         {
@@ -1057,20 +1097,22 @@ class PlanningAgent:
                             "phase": "acceptance_criterion_fallback",
                             "current": 0,
                             "total": len(acceptance_items),
-                            "message": "parallel chunk 生成に失敗したため逐次へフォールバック",
+                            "message": "parallel chunk 生成に失敗したため未完了分を逐次へフォールバック",
                             "last_event_at": _format_progress_timestamp(),
                             "last_event_kind": "fallback",
                             "parallelism": parallelism,
-                            "fallback_reason": type(exc).__name__,
+                            "fallback_reason": type(failure_exc).__name__,
+                            "remaining_chunks": len(remaining_by_index),
                         }
                     )
-                case_chunks = [
-                    self._build_test_plan_chunk(
+                for index in sorted(remaining_by_index):
+                    spec = remaining_by_index[index]
+                    chunks_by_index[index] = self._build_test_plan_chunk(
                         client=client,
                         workspace=workspace,
                         seed_context=seed_context,
                         overview=overview,
-                        acceptance=acceptance,
+                        acceptance=str(spec["acceptance"]),
                         index=index,
                         total=len(acceptance_items),
                         planning_config=planning_config,
@@ -1078,8 +1120,7 @@ class PlanningAgent:
                         debug_recorder=debug_recorder,
                         overview_session_id=overview_result.session_id,
                     )
-                    for index, acceptance in enumerate(acceptance_items, start=1)
-                ]
+            case_chunks = [chunks_by_index[index] for index in range(1, len(acceptance_items) + 1)]
 
         return _merge_test_plan_chunks(overview, case_chunks)
 

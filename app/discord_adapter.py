@@ -1471,18 +1471,59 @@ class DevBotClient(DiscordClientBase):
         progress_lock = threading.Lock()
         self.state_store.clear_debug_artifacts(thread_id)
 
+        phase_rank = {
+            "plan": 10,
+            "overview": 20,
+            "overview_completed": 30,
+            "acceptance_criterion_dispatch": 35,
+            "acceptance_criterion": 40,
+            "acceptance_criterion_completed": 50,
+            "acceptance_criterion_fallback": 60,
+            "done": 100,
+        }
+
+        def progress_order(payload: dict[str, Any]) -> tuple[int, int, str]:
+            current = int(payload.get("current", 0) or 0)
+            phase = str(payload.get("phase", "")).strip()
+            last_event_at = str(payload.get("last_event_at", "")).strip()
+            return current, phase_rank.get(phase, 0), last_event_at
+
+        def should_advance_progress(current_state: dict[str, Any], payload: dict[str, Any]) -> bool:
+            tracked_keys = {"phase", "current", "acceptance_criterion", "message", "last_event_kind", "last_event_at"}
+            if not tracked_keys.intersection(payload):
+                return False
+            return progress_order(payload) >= progress_order(current_state)
+
         def report_progress(payload: dict[str, Any]) -> None:
             normalized_payload = _json_safe_value(payload)
             if not isinstance(normalized_payload, dict):
                 normalized_payload = {}
             with progress_lock:
-                progress_state.update(normalized_payload)
+                session_id = str(normalized_payload.get("session_id", "")).strip()
+                parallelism = normalized_payload.get("parallelism")
+                if parallelism is not None:
+                    progress_state["parallelism"] = parallelism
+                fallback_reason = str(normalized_payload.get("fallback_reason", "")).strip()
+                if fallback_reason:
+                    progress_state["fallback_reason"] = fallback_reason
+                remaining_chunks = normalized_payload.get("remaining_chunks")
+                if remaining_chunks is not None:
+                    progress_state["remaining_chunks"] = remaining_chunks
+                status_value = str(normalized_payload.get("status", "")).strip()
+                if status_value:
+                    progress_state["status"] = status_value
+                total_value = normalized_payload.get("total")
+                if total_value is not None:
+                    progress_state["total"] = total_value
+                if should_advance_progress(progress_state, normalized_payload):
+                    progress_state.update(normalized_payload)
                 session_id = str(normalized_payload.get("session_id", "")).strip()
                 if session_id:
                     session_ids = progress_state.setdefault("session_ids", [])
                     if session_id not in session_ids:
                         session_ids.append(session_id)
-                    progress_state["last_session_id"] = session_id
+                    if should_advance_progress(progress_state, normalized_payload):
+                        progress_state["last_session_id"] = session_id
                 self.state_store.write_artifact(thread_id, "planning_progress.json", dict(progress_state))
             status = str(payload.get("status", "")).strip()
             if status and not self.state_store.issue_key_for_thread(thread_id):
