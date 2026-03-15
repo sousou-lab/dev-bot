@@ -3,10 +3,10 @@
   "state": "Human Review",
   "failure_type": "",
   "summary": [
-    "Repo profiling now records the full repository file count separately from the sampled file list.",
-    "Auto committee selection now uses the full file count, so min_repo_files thresholds above 200 work as intended.",
-    "Planning progress now advances into acceptance_criterion_fallback even when current resets to 0 during sequential fallback.",
-    "Added regression tests for sampled-vs-full file counts, auto-mode large-repo selection, fallback progress persistence, and stabilized the existing parallel fallback test."
+    "Codex app-server backend now sends workspace-write sandbox values that match the current app-server schema.",
+    "Python verification fallback now uses uv run python -m pytest -q, which is more robust for repo-local packages that are not installed into a temporary environment.",
+    "Protected config defaults no longer block pyproject.toml scaffolding, reducing friction for new Python repositories.",
+    "Added regression tests for app-server sandbox payloads, Python profiler defaults, and protected config defaults."
   ],
   "risks": []
 }

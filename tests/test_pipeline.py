@@ -357,6 +357,18 @@ class PipelineUnitTests(unittest.TestCase):
         self.assertTrue(label_present)
         self.assertEqual([], allowlist)
 
+    def test_default_protected_config_patterns_allow_pyproject_scaffolding(self) -> None:
+        self.assertNotIn("pyproject.toml", self.pipeline.PROTECTED_CONFIG_PATTERNS)
+        violations, label_present, allowlist = self.pipeline._protected_config_violations(
+            changed_files=["pyproject.toml"],
+            issue={"labels": [], "body": ""},
+            issue_key="owner/repo#8",
+        )
+
+        self.assertEqual([], violations)
+        self.assertFalse(label_present)
+        self.assertEqual([], allowlist)
+
     def test_protected_config_issue_body_allowlist_allows_listed_path(self) -> None:
         issue_key = "owner/repo#6"
         self.state_store.create_issue_record(issue_key)

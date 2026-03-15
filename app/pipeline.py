@@ -79,7 +79,6 @@ class DevelopmentPipeline:
         "CLAUDE.md",
         ".claude/**",
         ".github/workflows/**",
-        "pyproject.toml",
         "docs/policy/**",
         "docs/GITHUB_APP_SETUP.md",
         "docs/PROJECT_V2_SETUP.md",

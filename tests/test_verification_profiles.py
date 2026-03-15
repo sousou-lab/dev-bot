@@ -64,7 +64,7 @@ class VerificationProfileTests(unittest.TestCase):
         self.assertEqual("python-basic", profile["suggested_verification_profile"])
         self.assertIn("uv run --with ruff ruff check .", profile["lint_commands"])
         self.assertIn("uv run --with pyright pyright .", profile["typecheck_commands"])
-        self.assertIn("uv run --with pytest pytest -q", profile["test_commands"])
+        self.assertIn("uv run python -m pytest -q", profile["test_commands"])
 
     def test_repo_profiler_reports_full_file_count_while_sampling_file_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
