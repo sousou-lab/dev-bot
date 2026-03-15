@@ -43,13 +43,28 @@ class VerificationProfileTests(unittest.TestCase):
     def test_workflow_verification_from_plan_emits_hard_and_advisory_checks(self) -> None:
         verification = workflow_verification_from_plan(
             {
+                "bootstrap_commands": ["uv sync"],
                 "hard_checks": [{"name": "lint", "command": "ruff check ."}],
                 "advisory_checks": [{"name": "format", "command": "ruff format --check ."}],
             }
         )
 
+        self.assertEqual(["uv sync"], verification["bootstrap_commands"])
         self.assertEqual("hard", verification["required_checks"][0]["category"])
         self.assertEqual("advisory", verification["advisory_checks"][0]["category"])
+
+    def test_repo_profiler_bootstraps_python_verification_tools_without_repo_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "app.py").write_text("print('ok')\n", encoding="utf-8")
+            Path(tmpdir, "tests").mkdir()
+            Path(tmpdir, "tests", "test_app.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+            profile = build_repo_profile(tmpdir)
+
+        self.assertEqual("python-basic", profile["suggested_verification_profile"])
+        self.assertIn("uv run --with ruff ruff check .", profile["lint_commands"])
+        self.assertIn("uv run --with pyright pyright .", profile["typecheck_commands"])
+        self.assertIn("uv run --with pytest pytest -q", profile["test_commands"])
 
     def test_build_verification_plan_for_python_includes_fast_repair_profile(self) -> None:
         repo_profile = {

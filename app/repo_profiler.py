@@ -14,13 +14,16 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
     pyproject = root / "pyproject.toml"
     requirements = root / "requirements.txt"
     repo_config = _load_repo_config(root)
+    python_detected = any(path.endswith(".py") for path in files)
+    js_detected = any(path.endswith((".ts", ".tsx", ".js", ".jsx")) for path in files)
+    ts_detected = any(path.endswith((".ts", ".tsx")) for path in files)
 
     languages: list[str] = []
-    if any(path.endswith(".py") for path in files):
+    if python_detected:
         languages.append("python")
-    if any(path.endswith((".ts", ".tsx", ".js", ".jsx")) for path in files):
+    if js_detected:
         languages.append("javascript")
-    if any(path.endswith((".ts", ".tsx")) for path in files):
+    if ts_detected:
         languages.append("typescript")
     if repo_config.get("language"):
         configured = str(repo_config["language"]).strip()
@@ -34,15 +37,18 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
     format_commands: list[str] = []
     build_commands: list[str] = []
     migration = _detect_migration(root, files)
-    if pyproject.exists() or requirements.exists():
-        test_commands.append("pytest -q")
+    if python_detected:
         lint_commands.append("python -m compileall .")
-        format_commands.append("uv run ruff format --check .")
-        lint_commands.append("uv run ruff check .")
+        lint_commands.append("uv run --with ruff ruff check .")
+        typecheck_commands.append("uv run --with pyright pyright .")
+        format_commands.append("uv run --with ruff ruff format --check .")
+        if any(Path(path).name.startswith("test_") or "/tests/" in f"/{path}" for path in files):
+            test_commands.append("uv run --with pytest pytest -q")
+    if pyproject.exists() or requirements.exists():
         if requirements.exists():
-            setup_commands.append("pip install -r requirements.txt")
+            setup_commands.append("uv pip install -r requirements.txt")
         elif pyproject.exists():
-            setup_commands.append("pip install -e .")
+            setup_commands.append("uv sync")
     if package_json.exists():
         try:
             package_data = json.loads(package_json.read_text(encoding="utf-8"))
@@ -63,7 +69,9 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
             typecheck_commands.append("npm run typecheck")
         elif (root / "tsconfig.json").exists():
             typecheck_commands.append("npx tsc --noEmit")
-        setup_commands.append("npm install")
+        if "lint" not in scripts and _has_eslint_config(root, files):
+            lint_commands.append("npx eslint .")
+        setup_commands.append("npm install --no-audit --no-fund")
     if any(path.endswith(".html") for path in files) and not package_json.exists() and not pyproject.exists():
         languages.append("html")
 
@@ -81,7 +89,7 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
     return {
         "workspace": workspace,
         "languages": languages,
-        "test_commands": _unique(test_commands) or ["pytest -q"],
+        "test_commands": _unique(test_commands),
         "setup_commands": _unique(setup_commands),
         "lint_commands": _unique(lint_commands),
         "typecheck_commands": _unique(typecheck_commands),
@@ -203,3 +211,29 @@ def _suggest_verification_profile(
             return "python-typecheck"
         return "python-basic"
     return "generic-minimal"
+
+
+def _has_eslint_config(root: Path, files: list[str]) -> bool:
+    config_names = {
+        ".eslintrc",
+        ".eslintrc.js",
+        ".eslintrc.cjs",
+        ".eslintrc.json",
+        ".eslintrc.yaml",
+        ".eslintrc.yml",
+        "eslint.config.js",
+        "eslint.config.cjs",
+        "eslint.config.mjs",
+        "eslint.config.ts",
+    }
+    file_names = {Path(path).name for path in files}
+    if file_names & config_names:
+        return True
+    package_json = root / "package.json"
+    if not package_json.exists():
+        return False
+    try:
+        package_data = json.loads(package_json.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return "eslintConfig" in package_data
