@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+PLANNING_STALLED_AFTER = timedelta(minutes=10)
 
 
 def _format_elapsed_ms(value: Any) -> str:
@@ -18,6 +21,34 @@ def _format_elapsed_ms(value: Any) -> str:
     minutes = int(seconds // 60)
     remaining_seconds = int(seconds % 60)
     return f"{minutes}m{remaining_seconds:02d}s"
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _planning_health(planning_progress: dict[str, Any]) -> str:
+    status = str(planning_progress.get("status", "")).strip()
+    if status in {"completed", "done"}:
+        return ""
+    last_event_at = _parse_timestamp(planning_progress.get("last_event_at"))
+    if last_event_at is None:
+        return ""
+    age = datetime.now(UTC) - last_event_at
+    if age >= PLANNING_STALLED_AFTER:
+        return f"stalled {int(age.total_seconds() // 60)}m"
+    return "active"
 
 
 def format_status_message(
@@ -59,12 +90,15 @@ def format_status_message(
         last_event_kind = str(planning_progress.get("last_event_kind", "")).strip()
         last_event_at = str(planning_progress.get("last_event_at", "")).strip()
         elapsed = _format_elapsed_ms(planning_progress.get("elapsed_ms"))
+        planning_health = _planning_health(planning_progress)
         if total > 0:
             lines.append(f"planning_progress: `{phase} {current}/{total}`")
         elif phase:
             lines.append(f"planning_progress: `{phase}`")
         if acceptance:
             lines.append(f"planning_acceptance: {acceptance}")
+        if planning_health:
+            lines.append(f"planning_health: `{planning_health}`")
         if last_event_kind or elapsed:
             heartbeat = " ".join(part for part in [last_event_kind, elapsed] if part).strip()
             if heartbeat:
@@ -128,12 +162,15 @@ def format_why_failed_message(
                 last_event_kind = str(planning_progress.get("last_event_kind", "")).strip()
                 last_event_at = str(planning_progress.get("last_event_at", "")).strip()
                 elapsed = _format_elapsed_ms(planning_progress.get("elapsed_ms"))
+                planning_health = _planning_health(planning_progress)
                 if total > 0:
                     lines.append(f"- planning_progress: `{phase} {current}/{total}`")
                 elif phase:
                     lines.append(f"- planning_progress: `{phase}`")
                 if acceptance:
                     lines.append(f"- acceptance_criterion: {acceptance}")
+                if planning_health:
+                    lines.append(f"- planning_health: `{planning_health}`")
                 if last_event_kind or elapsed:
                     heartbeat = " ".join(part for part in [last_event_kind, elapsed] if part).strip()
                     if heartbeat:
