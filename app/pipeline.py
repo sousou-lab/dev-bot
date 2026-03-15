@@ -24,12 +24,13 @@ from app.github_client import GitHubIssueClient
 from app.implementation.candidate_policy import candidate_rank_tuple, eligible, exact_tie, select_winner
 from app.process_registry import ProcessRegistry
 from app.proof_of_work import evaluate_proof_of_work
+from app.repo_profiler import build_repo_profile
 from app.review.github_poster import GitHubReviewPoster
 from app.runners.claude_runner import ClaudeRunner
 from app.runners.codex_runner import CodexRunner, RunIdentity
 from app.state_store import FileStateStore
 from app.telemetry.jsonl import JsonlTelemetrySink
-from app.verification_profiles import workflow_verification_from_plan
+from app.verification_profiles import build_verification_plan, workflow_verification_from_plan
 from app.workflow_loader import load_workflow, workflow_text
 from app.workspace_manager import WorkspaceManager
 
@@ -255,10 +256,10 @@ class DevelopmentPipeline:
             },
         )
 
-        workflow = load_workflow(workspace=workspace_info["workspace"])
-        if not workflow:
-            workflow = load_workflow(repo_root=".")
-        workflow = self._resolve_workflow(workflow, verification_plan)
+        workflow = self._load_effective_workflow(
+            workspace=workspace_info["workspace"],
+            verification_plan=verification_plan,
+        )
         incident_bundle_dir = self._materialize_incident_bundle(
             workflow=workflow,
             issue_key=issue_key,
@@ -974,6 +975,43 @@ class DevelopmentPipeline:
                 implementation_result,
             )
 
+        candidate_verification_plan = self._refresh_verification_plan_for_workspace(
+            workspace=workspace_info["workspace"],
+            plan=plan,
+            verification_plan=verification_plan,
+        )
+        candidate_workflow = self._load_effective_workflow(
+            workspace=workspace_info["workspace"],
+            verification_plan=candidate_verification_plan,
+        )
+        self.state_store.write_execution_artifact(
+            issue_key,
+            f"candidates/{candidate_id}/verification_plan.json",
+            candidate_verification_plan,
+            run_id,
+        )
+        self.state_store.write_candidate_artifact(
+            issue_key,
+            attempt_id,
+            candidate_id,
+            "verification_plan.json",
+            candidate_verification_plan,
+        )
+        candidate_effective_workflow = self._json_safe(candidate_workflow)
+        self.state_store.write_execution_artifact(
+            issue_key,
+            f"candidates/{candidate_id}/effective_workflow.json",
+            candidate_effective_workflow,
+            run_id,
+        )
+        self.state_store.write_candidate_artifact(
+            issue_key,
+            attempt_id,
+            candidate_id,
+            "effective_workflow.json",
+            candidate_effective_workflow,
+        )
+
         changed_files = {"changed_files": self._detect_changed_files(workspace_info["workspace"])}
         self.state_store.write_execution_artifact(
             issue_key,
@@ -989,7 +1027,7 @@ class DevelopmentPipeline:
             changed_files=changed_files,
             issue=issue,
             issue_key=issue_key,
-            workflow=workflow,
+            workflow=candidate_workflow,
         )
         self.state_store.write_execution_artifact(
             issue_key,
@@ -1021,7 +1059,7 @@ class DevelopmentPipeline:
             client=chat_client,
             channel=channel,
             workspace=workspace_info["workspace"],
-            workflow=workflow,
+            workflow=candidate_workflow,
             issue_key=issue_key,
             run_id=run_id,
         )
@@ -1090,7 +1128,7 @@ class DevelopmentPipeline:
 
         repair_results = await self._execute_fast_repair_checks(
             workspace=workspace_info["workspace"],
-            verification_plan=verification_plan,
+            verification_plan=candidate_verification_plan,
         )
         repair_feedback = self._build_repair_feedback(
             candidate_id=candidate_id,
@@ -1141,12 +1179,12 @@ class DevelopmentPipeline:
                 channel=channel,
                 issue_key=issue_key,
                 run_id=run_id,
-                workflow=workflow,
+                workflow=candidate_workflow,
                 issue=issue,
                 summary=summary,
                 plan=plan,
                 test_plan=test_plan,
-                verification_plan=verification_plan,
+                verification_plan=candidate_verification_plan,
                 attempt_id=attempt_id,
                 workspace_info=workspace_info,
                 candidate_id=candidate_id,
@@ -1370,12 +1408,12 @@ class DevelopmentPipeline:
                     channel=channel,
                     issue_key=issue_key,
                     run_id=run_id,
-                    workflow=workflow,
+                    workflow=candidate_workflow,
                     issue=issue,
                     summary=summary,
                     plan=plan,
                     test_plan=test_plan,
-                    verification_plan=verification_plan,
+                    verification_plan=candidate_verification_plan,
                     attempt_id=attempt_id,
                     workspace_info=workspace_info,
                     candidate_id=candidate_id,
@@ -1399,7 +1437,7 @@ class DevelopmentPipeline:
             )
         if review_decision == "reject":
             self._maybe_write_replan_reason(
-                workflow=workflow,
+                workflow=candidate_workflow,
                 issue_key=issue_key,
                 attempt_id=attempt_id,
                 review_result=review_result,
@@ -1774,6 +1812,12 @@ class DevelopmentPipeline:
             ),
             "changed_files.json": candidate_result.changed_files,
             "scope_analysis.json": candidate_result.scope_analysis,
+            "verification_plan.json": self.state_store.load_candidate_artifact(
+                issue_key, attempt_id, candidate_result.candidate_id, "verification_plan.json"
+            ),
+            "effective_workflow.json": self.state_store.load_candidate_artifact(
+                issue_key, attempt_id, candidate_result.candidate_id, "effective_workflow.json"
+            ),
             "repair_feedback.json": self.state_store.load_candidate_artifact(
                 issue_key, attempt_id, candidate_result.candidate_id, "repair_feedback.json"
             ),
@@ -2653,6 +2697,8 @@ class DevelopmentPipeline:
             return f"Codex 実装で失敗しました。終了コード: `{result.codex_result.returncode}`"
         if result.failure_type == "hard_check_failed":
             return "verification の hard check が失敗しました。`/status` と `/why-failed` を確認してください。"
+        if result.failure_type == "environment_blocked":
+            return "verification 環境の bootstrap に失敗したため run を停止しました。環境要因を解消してから再実行してください。"
         if result.failure_type == "review_reject":
             return "review が reject を返したため PR 作成を中止しました。"
         if result.failure_type == "review_repairable":
@@ -3236,6 +3282,18 @@ class DevelopmentPipeline:
                     allow_not_applicable=allow_not_applicable,
                 )
             )
+            failure_type = self._classify_command_failure(
+                phase=phase,
+                category=category,
+                returncode=completed.returncode,
+                output=completed.stdout + completed.stderr,
+            )
+            if failure_type:
+                return {
+                    "results": results,
+                    "failure_type": failure_type,
+                    "stopped_before_command": command,
+                }
         return {"results": results}
 
     async def _execute_fast_repair_checks(
@@ -3288,12 +3346,19 @@ class DevelopmentPipeline:
     def _workflow_commands(self, workflow: dict[str, Any]) -> list[dict[str, Any]]:
         verification = workflow.get("verification", {})
         if isinstance(verification, dict):
+            bootstrap_commands = verification.get("bootstrap_commands", [])
             checks = verification.get("required_checks", [])
             advisory_checks = verification.get("advisory_checks", [])
-            if isinstance(checks, list) or isinstance(advisory_checks, list):
+            if isinstance(bootstrap_commands, list) or isinstance(checks, list) or isinstance(advisory_checks, list):
                 normalized_checks = self._normalize_required_checks(
-                    checks if isinstance(checks, list) else [],
-                    category="hard",
+                    bootstrap_commands if isinstance(bootstrap_commands, list) else [],
+                    category="bootstrap",
+                )
+                normalized_checks.extend(
+                    self._normalize_required_checks(
+                        checks if isinstance(checks, list) else [],
+                        category="hard",
+                    )
                 )
                 normalized_checks.extend(
                     self._normalize_required_checks(
@@ -3315,7 +3380,7 @@ class DevelopmentPipeline:
                 {
                     "phase": phase,
                     "command": str(command).strip(),
-                    "category": "hard",
+                    "category": "bootstrap" if phase == "setup" else "hard",
                     "allow_not_applicable": False,
                 }
                 for command in phase_commands
@@ -3340,16 +3405,118 @@ class DevelopmentPipeline:
                     }
                 )
                 continue
+            if isinstance(item, str) and item.strip() and category == "bootstrap":
+                normalized.append(
+                    {
+                        "phase": "bootstrap",
+                        "command": item.strip(),
+                        "category": category,
+                        "allow_not_applicable": False,
+                    }
+                )
+                continue
             if isinstance(item, str) and item.strip():
                 # String-only checks are accepted for backwards compatibility but do not
                 # provide an executable command. Keep runtime behavior explicit.
                 continue
         return normalized
 
-    def _resolve_workflow(self, workflow: dict[str, Any], verification_plan: dict[str, Any]) -> dict[str, Any]:
+    def _classify_command_failure(
+        self,
+        *,
+        phase: str,
+        category: str,
+        returncode: int,
+        output: str,
+    ) -> str:
+        if returncode == 0:
+            return ""
+        lowered = output.lower()
+        environment_markers = (
+            "failed to spawn",
+            "no such file or directory",
+            "command not found",
+            "is not recognized as an internal or external command",
+            "temporary failure in name resolution",
+            "name or service not known",
+            "network is unreachable",
+            "connection refused",
+            "could not resolve host",
+            "failed to download",
+            "failed to fetch",
+            "tls handshake timeout",
+            "timed out",
+            "connection reset by peer",
+        )
+        if category == "bootstrap":
+            return "environment_blocked"
+        if any(marker in lowered for marker in environment_markers):
+            return "environment_blocked"
+        return ""
+
+    def _load_effective_workflow(self, *, workspace: str, verification_plan: dict[str, Any]) -> dict[str, Any]:
+        workflow = load_workflow(workspace=workspace)
+        prefer_verification_plan = False
+        if not workflow:
+            workflow = load_workflow(repo_root=".")
+            prefer_verification_plan = True
+        return self._resolve_workflow(
+            workflow,
+            verification_plan,
+            prefer_verification_plan=prefer_verification_plan,
+        )
+
+    def _refresh_verification_plan_for_workspace(
+        self,
+        *,
+        workspace: str,
+        plan: dict[str, Any],
+        verification_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        refreshed_verification_plan = build_verification_plan(
+            workspace=workspace,
+            repo_profile=build_repo_profile(workspace),
+            plan=plan,
+        )
+        if self._should_refresh_verification_plan(
+            existing_verification_plan=verification_plan,
+            refreshed_verification_plan=refreshed_verification_plan,
+        ):
+            return refreshed_verification_plan
+        return verification_plan
+
+    def _should_refresh_verification_plan(
+        self,
+        *,
+        existing_verification_plan: dict[str, Any],
+        refreshed_verification_plan: dict[str, Any],
+    ) -> bool:
+        if not existing_verification_plan:
+            return True
+        existing_profile = str(existing_verification_plan.get("profile", "")).strip()
+        refreshed_profile = str(refreshed_verification_plan.get("profile", "")).strip()
+        if existing_profile == "generic-minimal" and refreshed_profile and refreshed_profile != existing_profile:
+            return True
+        existing_bootstrap = existing_verification_plan.get("bootstrap_commands", [])
+        refreshed_bootstrap = refreshed_verification_plan.get("bootstrap_commands", [])
+        if not existing_bootstrap and bool(refreshed_bootstrap):
+            return True
+        existing_checks = existing_verification_plan.get("hard_checks", [])
+        refreshed_checks = refreshed_verification_plan.get("hard_checks", [])
+        if not existing_checks and bool(refreshed_checks):
+            return True
+        return False
+
+    def _resolve_workflow(
+        self,
+        workflow: dict[str, Any],
+        verification_plan: dict[str, Any],
+        *,
+        prefer_verification_plan: bool = False,
+    ) -> dict[str, Any]:
         resolved = dict(workflow)
         verification = resolved.get("verification", {})
-        if isinstance(verification, dict) and verification.get("required_checks"):
+        if not prefer_verification_plan and isinstance(verification, dict) and verification.get("required_checks"):
             return resolved
         if verification_plan:
             resolved["verification"] = workflow_verification_from_plan(verification_plan)

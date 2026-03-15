@@ -1020,6 +1020,61 @@ class TestVerificationGating(unittest.TestCase):
         self.assertTrue(any("hard check が失敗しました" in item for item in messages))
         self.assertEqual("Rework", meta.get("status"))
 
+    def test_environment_blocked_failure_stops_run_as_blocked(self) -> None:
+        async def run_case() -> tuple[list[str], dict[str, Any]]:
+            tmpdir = tempfile.TemporaryDirectory()
+            workspace_dir = tempfile.mkdtemp()
+            pipeline, state_store, adapter, codex_log_path = _build_sync_pipeline_case(
+                workspace_dir=workspace_dir,
+                state_dir=tmpdir.name,
+            )
+            with (
+                patch.object(
+                    pipeline.workspace_manager,
+                    "prepare",
+                    side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir),
+                ),
+                patch.object(
+                    pipeline.codex_runner,
+                    "run",
+                    side_effect=lambda *args, **kwargs: _make_codex_result(
+                        returncode=0, stdout_path=str(codex_log_path)
+                    ),
+                ),
+                patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
+                patch("app.pipeline.load_workflow", return_value={"commands": {}}),
+                patch("app.pipeline.workflow_text", return_value="workflow text"),
+                patch.object(
+                    pipeline,
+                    "execute_workflow_commands",
+                    return_value={
+                        "results": [
+                            {
+                                "phase": "bootstrap",
+                                "category": "bootstrap",
+                                "command": "uv sync",
+                                "returncode": 1,
+                                "output": "failed to download",
+                                "success": False,
+                                "status": "fail",
+                            }
+                        ],
+                        "failure_type": "environment_blocked",
+                    },
+                ),
+            ):
+                await pipeline.execute_run(
+                    chat=adapter,
+                    thread_id=THREAD_ID,
+                    repo_full_name="owner/repo",
+                    issue=make_test_issue(),
+                )
+            return adapter.messages_for(THREAD_ID), state_store.load_meta(ISSUE_KEY)
+
+        messages, meta = asyncio.run(run_case())
+        self.assertTrue(any("bootstrap に失敗" in item for item in messages))
+        self.assertEqual("Blocked", meta.get("status"))
+
 
 class TestVerificationPlanFallback(unittest.TestCase):
     def test_verification_plan_fallback_drives_checks_when_workflow_missing(self) -> None:
@@ -1111,6 +1166,121 @@ class TestVerificationPlanFallback(unittest.TestCase):
         self.assertEqual("advisory", command_results["results"][1]["category"])
         self.assertEqual("fail", command_results["results"][1]["status"])
         self.assertTrue(any("draft PR" in item for item in messages))
+
+    def test_candidate_refresh_uses_verification_plan_over_repo_root_fallback(self) -> None:
+        async def run_case() -> tuple[dict[str, Any], dict[str, Any]]:
+            tmpdir = tempfile.TemporaryDirectory()
+            state_dir = tmpdir.name
+            workspace_dir = tempfile.mkdtemp()
+
+            state_store = FileStateStore(state_dir)
+            state_store.create_run(thread_id=THREAD_ID, parent_message_id=1, channel_id=2)
+            setup_planning_artifacts(
+                THREAD_ID,
+                state_store,
+                verification_plan={
+                    "profile": "generic-minimal",
+                    "hard_checks": [{"name": "workspace_sanity", "command": "sh -c 'exit 0'"}],
+                    "advisory_checks": [],
+                },
+            )
+            state_store.bind_issue(THREAD_ID, "owner/repo", 1)
+
+            github_client = MagicMock()
+            github_client.get_issue_snapshot.return_value = make_test_issue()
+            github_client.create_pull_request.return_value = _make_pr()
+            github_client.get_pull_request_status.return_value = {
+                "draft": True,
+                "mergeable": True,
+                "mergeable_state": "clean",
+                "head_sha": "headsha123",
+            }
+            github_client.ready_pull_request_for_review.return_value = {"ready_for_review": True}
+            github_client.create_issue_comment.return_value = None
+            github_client.update_issue_state.return_value = None
+            github_client.upsert_workpad_comment.return_value = None
+
+            pipeline = DevelopmentPipeline(
+                settings=make_test_settings(workspace_root=workspace_dir, state_dir=state_dir),
+                state_store=state_store,
+                github_client=github_client,
+                process_registry=ProcessRegistry(state_dir),
+                approval_coordinator=ApprovalCoordinator(state_store),
+            )
+
+            async def _run_blocking(func, /, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            pipeline._run_blocking = _run_blocking  # type: ignore[method-assign]
+            adapter = InMemoryAdapter()
+            adapter.register_channel(THREAD_ID)
+            codex_log_path = Path(workspace_dir) / "codex.log"
+            codex_log_path.write_text("codex run log\n", encoding="utf-8")
+
+            def _load_workflow(*, workspace: str | None = None, repo_root: str | None = None) -> dict[str, Any]:
+                if workspace is not None:
+                    return {}
+                if repo_root is not None:
+                    return {
+                        "verification": {
+                            "required_checks": [{"name": "lint", "command": "sh -c 'exit 9'"}],
+                        }
+                    }
+                return {}
+
+            refreshed_plan = {
+                "profile": "python-basic",
+                "bootstrap_commands": ["sh -c 'exit 0'"],
+                "hard_checks": [{"name": "lint", "command": "sh -c 'exit 0'"}],
+                "advisory_checks": [],
+                "repair_checks": [],
+            }
+
+            with (
+                patch.object(
+                    pipeline.workspace_manager,
+                    "prepare",
+                    side_effect=lambda *args, **kwargs: _make_workspace_info(workspace_dir),
+                ),
+                patch.object(
+                    pipeline.codex_runner,
+                    "run",
+                    side_effect=lambda *args, **kwargs: _make_codex_result(
+                        returncode=0, stdout_path=str(codex_log_path)
+                    ),
+                ),
+                patch.object(pipeline, "_detect_changed_files", side_effect=lambda *args, **kwargs: ["file.py"]),
+                patch("app.pipeline.load_workflow", side_effect=_load_workflow),
+                patch("app.pipeline.workflow_text", return_value="workflow text"),
+                patch("app.pipeline.build_repo_profile", return_value={"languages": ["python"]}),
+                patch("app.pipeline.build_verification_plan", return_value=refreshed_plan),
+                patch.object(
+                    pipeline.claude_runner, "verify", side_effect=lambda *args, **kwargs: _make_verification()
+                ),
+                patch.object(pipeline.claude_runner, "review", side_effect=lambda *args, **kwargs: _make_review()),
+                patch.object(
+                    pipeline, "_capture_git_diff", side_effect=lambda *args, **kwargs: "diff --git a/file.py b/file.py"
+                ),
+                patch.object(pipeline, "_commit_and_push", side_effect=lambda *args, **kwargs: True),
+            ):
+                await pipeline.execute_run(
+                    chat=adapter,
+                    thread_id=THREAD_ID,
+                    repo_full_name="owner/repo",
+                    issue=make_test_issue(),
+                )
+
+            return (
+                state_store.load_artifact(ISSUE_KEY, "command_results.json"),
+                state_store.load_artifact(ISSUE_KEY, "verification_plan.json"),
+            )
+
+        command_results, verification_plan = asyncio.run(run_case())
+        self.assertEqual("bootstrap", command_results["results"][0]["category"])
+        self.assertEqual("sh -c 'exit 0'", command_results["results"][0]["command"])
+        self.assertEqual("sh -c 'exit 0'", command_results["results"][1]["command"])
+        self.assertEqual("python-basic", verification_plan["profile"])
+        self.assertEqual(["sh -c 'exit 0'"], verification_plan["bootstrap_commands"])
 
 
 class TestVerificationFailure(unittest.TestCase):

@@ -13,6 +13,7 @@ def build_verification_plan(
     profile = _select_profile(repo_profile)
     repair_profile = _select_repair_profile(profile)
     scope_paths = _select_scope(plan)
+    bootstrap_commands = _commands_for_scope(repo_profile.get("setup_commands", []), scope_paths)
     hard_checks, advisory_checks = _build_checks(profile, repo_profile, scope_paths)
     repair_checks = _build_repair_checks(repair_profile, repo_profile, scope_paths)
     return {
@@ -22,6 +23,7 @@ def build_verification_plan(
         "selection_reason": _selection_reason(profile, repo_profile),
         "confidence": _confidence(profile),
         "profile_patch": {},
+        "bootstrap_commands": bootstrap_commands,
         "hard_checks": hard_checks,
         "advisory_checks": advisory_checks,
         "repair_checks": repair_checks,
@@ -29,9 +31,11 @@ def build_verification_plan(
 
 
 def workflow_verification_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    bootstrap_commands = plan.get("bootstrap_commands", []) if isinstance(plan, dict) else []
     hard_checks = plan.get("hard_checks", []) if isinstance(plan, dict) else []
     advisory_checks = plan.get("advisory_checks", []) if isinstance(plan, dict) else []
     return {
+        "bootstrap_commands": [str(item).strip() for item in bootstrap_commands if str(item).strip()],
         "required_checks": [_workflow_check(item, "hard") for item in hard_checks if isinstance(item, dict)],
         "advisory_checks": [_workflow_check(item, "advisory") for item in advisory_checks if isinstance(item, dict)],
     }

@@ -777,6 +777,55 @@ class PipelineUnitTests(unittest.TestCase):
         self.assertTrue(payload["hard_checks_pass"])
         self.assertEqual(["looks good"], payload["notes"])
 
+    def test_workflow_commands_include_bootstrap_before_required_checks(self) -> None:
+        commands = self.pipeline._workflow_commands(
+            {
+                "verification": {
+                    "bootstrap_commands": ["uv sync"],
+                    "required_checks": [{"name": "lint", "command": "uv run ruff check ."}],
+                }
+            }
+        )
+
+        self.assertEqual("bootstrap", commands[0]["category"])
+        self.assertEqual("uv sync", commands[0]["command"])
+        self.assertEqual("lint", commands[1]["phase"])
+
+    def test_classify_command_failure_marks_missing_tool_as_environment_blocked(self) -> None:
+        failure_type = self.pipeline._classify_command_failure(
+            phase="lint",
+            category="hard",
+            returncode=2,
+            output="error: Failed to spawn: `ruff`\nCaused by: No such file or directory (os error 2)\n",
+        )
+
+        self.assertEqual("environment_blocked", failure_type)
+
+    def test_resolve_workflow_prefers_verification_plan_for_repo_root_fallback(self) -> None:
+        resolved = self.pipeline._resolve_workflow(
+            {"verification": {"required_checks": [{"name": "lint", "command": "uv run ruff check ."}]}},
+            {"hard_checks": [{"name": "tests", "command": "uv run pytest -q"}]},
+            prefer_verification_plan=True,
+        )
+
+        self.assertEqual("uv run pytest -q", resolved["verification"]["required_checks"][0]["command"])
+
+    def test_should_refresh_verification_plan_when_generic_minimal_can_be_upgraded(self) -> None:
+        should_refresh = self.pipeline._should_refresh_verification_plan(
+            existing_verification_plan={
+                "profile": "generic-minimal",
+                "bootstrap_commands": [],
+                "hard_checks": [{"name": "workspace_sanity", "command": "python -c 'print(1)'"}],
+            },
+            refreshed_verification_plan={
+                "profile": "python-basic",
+                "bootstrap_commands": ["uv pip install -r requirements.txt"],
+                "hard_checks": [{"name": "lint", "command": "uv run --with ruff ruff check ."}],
+            },
+        )
+
+        self.assertTrue(should_refresh)
+
     def test_can_minor_repair_reuse_requires_narrow_repairable_conditions(self) -> None:
         allowed = self.pipeline._can_minor_repair_reuse(
             review_result={
