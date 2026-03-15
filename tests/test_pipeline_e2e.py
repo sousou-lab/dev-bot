@@ -1461,7 +1461,8 @@ class TestPolicyViolation(PipelineE2EBase):
         }
         with (
             self._patch_workspace(),
-            self._patch_codex(),
+            patch.object(self.pipeline.codex_runner, "run") as codex_run,
+            patch.object(self.pipeline.claude_runner, "verify") as verify,
             self._patch_detect_changed(),
             self._patch_workflow(workflow),
             self._patch_workflow_text(),
@@ -1473,5 +1474,7 @@ class TestPolicyViolation(PipelineE2EBase):
                 issue=make_test_issue(),
             )
 
+        codex_run.assert_not_called()
+        verify.assert_not_called()
         self.adapter.assert_message_contains(THREAD_ID, "禁止または高リスク")
         self.assertEqual(self.state_store.load_meta(ISSUE_KEY).get("status"), "Human Review")

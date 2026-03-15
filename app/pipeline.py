@@ -858,6 +858,28 @@ class DevelopmentPipeline:
         def build_candidate_result(**kwargs: Any) -> CandidateExecutionResult:
             return CandidateExecutionResult(duration_ms=int((time.monotonic() - started_at) * 1000), **kwargs)
 
+        preflight_command_results = await self._preflight_workflow_policy(
+            channel=channel,
+            workflow=workflow,
+        )
+        if preflight_command_results is not None:
+            return build_candidate_result(
+                candidate_id=candidate_id,
+                workspace_info=workspace_info,
+                codex_result=SimpleNamespace(mode="app-server"),
+                codex_log_path="",
+                changed_files={"changed_files": []},
+                scope_analysis={},
+                command_results=preflight_command_results,
+                verification={},
+                verification_json={},
+                review={},
+                proof_result={},
+                success=False,
+                failure_type="policy_violation",
+                failure_state="Human Review",
+            )
+
         allow_turn_steer = self._should_allow_turn_steer(workflow=workflow, handoff_bundle=handoff_bundle)
         allow_thread_resume_same_run_only = self._should_allow_thread_resume_same_run_only(workflow=workflow)
         candidate_run_dir = self.state_store.execution_run_dir(issue_key, run_id) / "candidates" / candidate_id
@@ -3295,6 +3317,29 @@ class DevelopmentPipeline:
                     "stopped_before_command": command,
                 }
         return {"results": results}
+
+    async def _preflight_workflow_policy(
+        self,
+        *,
+        channel: ChatChannel,
+        workflow: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        for check in self._workflow_commands(workflow):
+            phase = str(check["phase"])
+            command = str(check["command"])
+            if not is_high_risk_command(command):
+                continue
+            await channel.send(
+                "禁止または高リスクの workflow command を検出したため停止します。\n"
+                f"- phase: `{phase}`\n"
+                f"- command: `{command}`"
+            )
+            return {
+                "results": [],
+                "failure_type": "policy_violation",
+                "stopped_before_command": command,
+            }
+        return None
 
     async def _execute_fast_repair_checks(
         self,
