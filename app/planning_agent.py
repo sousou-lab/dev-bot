@@ -1032,11 +1032,46 @@ class PlanningAgent:
                 for index, acceptance in enumerate(acceptance_items, start=1)
             ]
         else:
-            chunks_by_index: dict[int, dict[str, Any]] = {}
-            with ThreadPoolExecutor(max_workers=parallelism) as executor:
-                future_to_index = {
-                    executor.submit(
-                        self._build_test_plan_chunk,
+            try:
+                chunks_by_index: dict[int, dict[str, Any]] = {}
+                with ThreadPoolExecutor(max_workers=parallelism) as executor:
+                    future_to_index = {
+                        executor.submit(
+                            self._build_test_plan_chunk,
+                            client=client,
+                            workspace=workspace,
+                            seed_context=seed_context,
+                            overview=overview,
+                            acceptance=acceptance,
+                            index=index,
+                            total=len(acceptance_items),
+                            planning_config=planning_config,
+                            progress_callback=progress_callback,
+                            debug_recorder=debug_recorder,
+                            overview_session_id=overview_result.session_id,
+                        ): index
+                        for index, acceptance in enumerate(acceptance_items, start=1)
+                    }
+                    for future in as_completed(future_to_index):
+                        chunks_by_index[future_to_index[future]] = future.result()
+                case_chunks = [chunks_by_index[index] for index in range(1, len(acceptance_items) + 1)]
+            except Exception as exc:
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "status": "test_plan_generating",
+                            "phase": "acceptance_criterion_fallback",
+                            "current": 0,
+                            "total": len(acceptance_items),
+                            "message": "parallel chunk 生成に失敗したため逐次へフォールバック",
+                            "last_event_at": _format_progress_timestamp(),
+                            "last_event_kind": "fallback",
+                            "parallelism": parallelism,
+                            "fallback_reason": type(exc).__name__,
+                        }
+                    )
+                case_chunks = [
+                    self._build_test_plan_chunk(
                         client=client,
                         workspace=workspace,
                         seed_context=seed_context,
@@ -1048,12 +1083,9 @@ class PlanningAgent:
                         progress_callback=progress_callback,
                         debug_recorder=debug_recorder,
                         overview_session_id=overview_result.session_id,
-                    ): index
+                    )
                     for index, acceptance in enumerate(acceptance_items, start=1)
-                }
-                for future in as_completed(future_to_index):
-                    chunks_by_index[future_to_index[future]] = future.result()
-            case_chunks = [chunks_by_index[index] for index in range(1, len(acceptance_items) + 1)]
+                ]
 
         return _merge_test_plan_chunks(overview, case_chunks)
 

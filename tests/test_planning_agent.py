@@ -910,6 +910,95 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
             self.assertEqual(3, test_plan_client.chunk_calls)
             self.assertEqual(2, test_plan_client.max_active)
 
+    def test_legacy_test_plan_parallel_failure_falls_back_to_sequential(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "WORKFLOW.md").write_text(
+                (
+                    "---\n"
+                    "planning:\n"
+                    "  provider: claude-agent-sdk\n"
+                    "  mode: legacy\n"
+                    "  test_plan_max_parallelism: 2\n"
+                    "implementation:\n"
+                    "  backend: codex-app-server\n"
+                    "review:\n"
+                    "  provider: claude-agent-sdk\n"
+                    "---\n"
+                ),
+                encoding="utf-8",
+            )
+            agent = PlanningAgent(make_test_settings())
+            plan_client = Mock()
+            plan_client.json_response.return_value = {
+                "version": 2,
+                "goal": "Ship it",
+                "scope": ["Implement x"],
+                "assumptions": [],
+                "candidate_files": ["app/x.py"],
+                "must_not_touch": ["WORKFLOW.md"],
+                "verification_focus": ["keep tests green"],
+                "exploration_required": False,
+                "implementation_steps": ["Implement x"],
+                "verification_steps": ["Run tests"],
+                "risks": [],
+                "high_risk_changes": [],
+            }
+            progress_events: list[dict[str, object]] = []
+            active = 0
+            failed_once = False
+            lock = threading.Lock()
+            ready = threading.Event()
+            test_plan_client = Mock()
+            test_plan_client.json_response_with_meta.return_value = Mock(
+                payload={
+                    "test_targets": ["tests/test_x.py"],
+                    "strategy": {"unit": [], "integration": [], "e2e": [], "mocking": []},
+                },
+                session_id="overview-session",
+            )
+
+            def _build_chunk(**kwargs):
+                nonlocal active, failed_once
+                index = kwargs["index"]
+                with lock:
+                    active += 1
+                    if active >= 2:
+                        ready.set()
+                ready.wait(timeout=1.0)
+                try:
+                    if index == 2 and not failed_once:
+                        failed_once = True
+                        raise RuntimeError("parallel boom")
+                    return {"cases": [], "regression_risks": [], "risks": []}
+                finally:
+                    with lock:
+                        active -= 1
+
+            with (
+                patch("app.planning_agent.ClaudeAgentClient", side_effect=[plan_client, test_plan_client]),
+                patch.object(
+                    agent,
+                    "_build_test_plan_chunk",
+                    side_effect=lambda **kwargs: _build_chunk(**kwargs),
+                ) as build_chunk,
+            ):
+                artifacts = agent.build_artifacts(
+                    workspace=tmpdir,
+                    summary={"goal": "Ship it", "acceptance_criteria": ["ac1", "ac2", "ac3"]},
+                    repo_profile={"files": ["app/x.py"]},
+                    progress_callback=progress_events.append,
+                )
+
+            self.assertEqual([], artifacts.test_plan["cases"])
+            self.assertGreaterEqual(build_chunk.call_count, 5)
+            self.assertTrue(
+                any(
+                    event.get("phase") == "acceptance_criterion_fallback"
+                    for event in progress_events
+                    if isinstance(event, dict)
+                )
+            )
+
     def test_committee_failure_falls_back_to_legacy_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "WORKFLOW.md").write_text(
