@@ -6,7 +6,7 @@ from typing import Any
 def _format_elapsed_ms(value: Any) -> str:
     try:
         elapsed_ms = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return ""
     if elapsed_ms <= 0:
         return ""

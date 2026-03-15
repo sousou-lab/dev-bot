@@ -16,6 +16,14 @@ class WorkflowSchemaTests(unittest.TestCase):
                     "timeout_seconds": 300,
                     "settings_sources": ["project"],
                     "legacy_fallback": {"enabled": True, "use_only_on_committee_failure": True},
+                    "autoselect_committee": {
+                        "enabled": True,
+                        "min_acceptance_criteria": 10,
+                        "min_acceptance_criteria_when_complex": 6,
+                        "min_summary_chars_when_complex": 2500,
+                        "min_repo_files": 100,
+                        "min_acceptance_criteria_with_large_repo": 5,
+                    },
                     "allowed_tools": ["Read", "Grep", "Glob"],
                     "skill_mode": "explicit_project_filesystem",
                     "committee": {
@@ -111,6 +119,8 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertEqual(["project"], config.planning.settings_sources)
         self.assertTrue(config.planning.legacy_fallback.enabled)
         self.assertTrue(config.planning.legacy_fallback.use_only_on_committee_failure)
+        self.assertEqual(10, config.planning.autoselect_committee.min_acceptance_criteria)
+        self.assertEqual(6, config.planning.autoselect_committee.min_acceptance_criteria_when_complex)
         self.assertEqual(["Read", "Grep", "Glob"], config.planning.allowed_tools)
         self.assertTrue(config.codex.allow_turn_steer)
         self.assertEqual(8, config.codex.compaction_policy.turn_count_gte)

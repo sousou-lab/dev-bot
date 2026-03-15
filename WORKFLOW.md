@@ -102,6 +102,13 @@ planning:
   provider: claude-agent-sdk
   enabled: true
   mode: committee
+  # `mode: auto` を使うと、要件規模に応じて committee / legacy を自動選択する。
+  # autoselect_committee:
+  #   min_acceptance_criteria: 12
+  #   min_acceptance_criteria_when_complex: 8
+  #   min_summary_chars_when_complex: 2800
+  #   min_repo_files: 120
+  #   min_acceptance_criteria_with_large_repo: 6
   legacy_fallback:
     enabled: true
     use_only_on_committee_failure: true

@@ -11,7 +11,12 @@ from typing import Any, TypedDict, cast
 from app.agent_sdk_client import ClaudeAgentClient
 from app.config import Settings
 from app.contracts.artifact_models import PlanV2
-from app.contracts.workflow_schema import CandidateModeTriggers, CommitteeRoleConfig, PlanningConfig
+from app.contracts.workflow_schema import (
+    CandidateModeTriggers,
+    CommitteeRoleConfig,
+    PlanningAutoselectCommitteeConfig,
+    PlanningConfig,
+)
 from app.implementation.candidate_policy import CandidateDecision, decide_candidates
 from app.planning.committee import PlannerCommittee
 from app.planning.roles.constraint_checker import ConstraintChecker
@@ -576,8 +581,21 @@ class PlanningAgent:
         repo_profile: dict[str, Any],
     ) -> str:
         if planning_config is not None:
-            return str(planning_config.mode or "committee").strip() or "committee"
-        if self._should_autoselect_committee(summary=summary, repo_profile=repo_profile):
+            mode = str(planning_config.mode or "committee").strip() or "committee"
+            if mode != "auto":
+                return mode
+            if self._should_autoselect_committee(
+                summary=summary,
+                repo_profile=repo_profile,
+                autoselect=planning_config.autoselect_committee,
+            ):
+                return "committee"
+            return "legacy"
+        if self._should_autoselect_committee(
+            summary=summary,
+            repo_profile=repo_profile,
+            autoselect=PlanningAutoselectCommitteeConfig(),
+        ):
             return "committee"
         return "legacy"
 
@@ -596,7 +614,10 @@ class PlanningAgent:
         *,
         summary: dict[str, Any],
         repo_profile: dict[str, Any],
+        autoselect: PlanningAutoselectCommitteeConfig,
     ) -> bool:
+        if not autoselect.enabled:
+            return False
         acceptance_count = len(
             [str(item).strip() for item in summary.get("acceptance_criteria", []) if str(item).strip()]
         )
@@ -604,13 +625,16 @@ class PlanningAgent:
         summary_chars = len(json.dumps(summary, ensure_ascii=False))
         repo_files = len([str(item).strip() for item in repo_profile.get("files", []) if str(item).strip()])
 
-        if acceptance_count >= 12:
+        if acceptance_count >= autoselect.min_acceptance_criteria:
             return True
-        if complexity == "complex" and acceptance_count >= 8:
+        if complexity == "complex" and acceptance_count >= autoselect.min_acceptance_criteria_when_complex:
             return True
-        if complexity == "complex" and summary_chars >= 2800:
+        if complexity == "complex" and summary_chars >= autoselect.min_summary_chars_when_complex:
             return True
-        if repo_files >= 120 and acceptance_count >= 6:
+        if (
+            repo_files >= autoselect.min_repo_files
+            and acceptance_count >= autoselect.min_acceptance_criteria_with_large_repo
+        ):
             return True
         return False
 

@@ -110,6 +110,28 @@ class PlanningLegacyFallbackConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningAutoselectCommitteeConfig:
+    enabled: bool = True
+    min_acceptance_criteria: int = 12
+    min_acceptance_criteria_when_complex: int = 8
+    min_summary_chars_when_complex: int = 2800
+    min_repo_files: int = 120
+    min_acceptance_criteria_with_large_repo: int = 6
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> PlanningAutoselectCommitteeConfig:
+        data = _require_mapping(payload, field_name="planning.autoselect_committee")
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            min_acceptance_criteria=int(data.get("min_acceptance_criteria", 12)),
+            min_acceptance_criteria_when_complex=int(data.get("min_acceptance_criteria_when_complex", 8)),
+            min_summary_chars_when_complex=int(data.get("min_summary_chars_when_complex", 2800)),
+            min_repo_files=int(data.get("min_repo_files", 120)),
+            min_acceptance_criteria_with_large_repo=int(data.get("min_acceptance_criteria_with_large_repo", 6)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningConfig:
     provider: str
     enabled: bool = True
@@ -121,6 +143,7 @@ class PlanningConfig:
     allowed_tools: list[str] = field(default_factory=list)
     skill_mode: str = ""
     legacy_fallback: PlanningLegacyFallbackConfig = field(default_factory=PlanningLegacyFallbackConfig)
+    autoselect_committee: PlanningAutoselectCommitteeConfig = field(default_factory=PlanningAutoselectCommitteeConfig)
     committee: PlanningCommitteeConfig | None = None
     gates: PlanningGates = field(default_factory=PlanningGates)
 
@@ -139,6 +162,11 @@ class PlanningConfig:
             if "legacy_fallback" in data
             else PlanningLegacyFallbackConfig()
         )
+        autoselect_committee = (
+            PlanningAutoselectCommitteeConfig.from_dict(data["autoselect_committee"])
+            if "autoselect_committee" in data
+            else PlanningAutoselectCommitteeConfig()
+        )
         return cls(
             provider=provider,
             enabled=bool(data.get("enabled", True)),
@@ -156,6 +184,7 @@ class PlanningConfig:
             ),
             skill_mode=str(data.get("skill_mode", "")).strip(),
             legacy_fallback=legacy_fallback,
+            autoselect_committee=autoselect_committee,
             committee=committee,
             gates=gates,
         )
