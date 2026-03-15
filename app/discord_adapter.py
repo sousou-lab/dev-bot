@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 import traceback
 from datetime import UTC, datetime
 from functools import partial
@@ -1467,20 +1468,22 @@ class DevBotClient(DiscordClientBase):
         planning_workspace = self.pipeline.workspace_manager.prepare_plan_workspace(repo, thread_id)
         repo_profile = build_repo_profile(planning_workspace["workspace"])
         progress_state: dict[str, Any] = {"session_ids": []}
+        progress_lock = threading.Lock()
         self.state_store.clear_debug_artifacts(thread_id)
 
         def report_progress(payload: dict[str, Any]) -> None:
             normalized_payload = _json_safe_value(payload)
             if not isinstance(normalized_payload, dict):
                 normalized_payload = {}
-            progress_state.update(normalized_payload)
-            session_id = str(normalized_payload.get("session_id", "")).strip()
-            if session_id:
-                session_ids = progress_state.setdefault("session_ids", [])
-                if session_id not in session_ids:
-                    session_ids.append(session_id)
-                progress_state["last_session_id"] = session_id
-            self.state_store.write_artifact(thread_id, "planning_progress.json", progress_state)
+            with progress_lock:
+                progress_state.update(normalized_payload)
+                session_id = str(normalized_payload.get("session_id", "")).strip()
+                if session_id:
+                    session_ids = progress_state.setdefault("session_ids", [])
+                    if session_id not in session_ids:
+                        session_ids.append(session_id)
+                    progress_state["last_session_id"] = session_id
+                self.state_store.write_artifact(thread_id, "planning_progress.json", dict(progress_state))
             status = str(payload.get("status", "")).strip()
             if status and not self.state_store.issue_key_for_thread(thread_id):
                 self.state_store.update_status(thread_id, status)

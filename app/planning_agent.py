@@ -682,7 +682,7 @@ class PlanningAgent:
         repo_profile: dict[str, Any],
     ) -> str:
         if planning_config is not None:
-            mode = str(planning_config.mode or "committee").strip() or "committee"
+            mode = str(planning_config.mode or "auto").strip() or "auto"
             if mode != "auto":
                 return mode
             if self._should_autoselect_committee(
@@ -692,12 +692,6 @@ class PlanningAgent:
             ):
                 return "committee"
             return "legacy"
-        if self._should_autoselect_committee(
-            summary=summary,
-            repo_profile=repo_profile,
-            autoselect=PlanningAutoselectCommitteeConfig(),
-        ):
-            return "committee"
         return "legacy"
 
     def _allow_legacy_fallback(self, planning_config: PlanningConfig | None) -> bool:
@@ -1155,7 +1149,7 @@ def _build_test_plan_seed_context(
         "requirement_summary": {
             "goal": _truncate_text(summary.get("goal", ""), 800),
             "in_scope": _coerce_string_list(summary.get("in_scope"), limit=12),
-            "acceptance_criteria": _coerce_string_list(summary.get("acceptance_criteria"), limit=20),
+            "acceptance_criteria": _coerce_string_list(summary.get("acceptance_criteria")),
             "constraints": _coerce_string_list(summary.get("constraints"), limit=8),
             "test_focus": _coerce_string_list(summary.get("test_focus"), limit=8),
             "preferred_outcomes": _coerce_string_list(summary.get("preferred_outcomes"), limit=6),
@@ -1196,11 +1190,11 @@ def _build_test_plan_seed_context(
     )
 
 
-def _coerce_string_list(value: Any, *, limit: int) -> list[str]:
+def _coerce_string_list(value: Any, *, limit: int | None = None) -> list[str]:
     if not isinstance(value, list):
         return []
     items = [str(item).strip() for item in value if str(item).strip()]
-    return items[:limit]
+    return items if limit is None else items[:limit]
 
 
 def _truncate_text(value: Any, limit: int) -> str:

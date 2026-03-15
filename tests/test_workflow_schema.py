@@ -118,6 +118,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         assert config.telemetry is not None
         self.assertEqual("query", config.planning.committee.roles["merger"].mode)
         self.assertEqual(4, config.planning.test_plan_max_parallelism)
+        self.assertEqual("auto", config.planning.mode)
         self.assertEqual(["project"], config.planning.settings_sources)
         self.assertTrue(config.planning.legacy_fallback.enabled)
         self.assertTrue(config.planning.legacy_fallback.use_only_on_committee_failure)
@@ -175,6 +176,12 @@ class WorkflowSchemaTests(unittest.TestCase):
     def test_planning_provider_is_required(self) -> None:
         with self.assertRaises(WorkflowValidationError):
             WorkflowConfig.from_dict({"planning": {"enabled": True}})
+
+    def test_planning_mode_defaults_to_auto_when_omitted(self) -> None:
+        config = WorkflowConfig.from_dict({"planning": {"provider": "claude-agent-sdk"}})
+
+        assert config.planning is not None
+        self.assertEqual("auto", config.planning.mode)
 
     def test_verification_requires_architecture_artifacts(self) -> None:
         with self.assertRaisesRegex(WorkflowValidationError, "verification_plan.json, runner_metadata.json"):

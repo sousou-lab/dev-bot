@@ -135,7 +135,7 @@ class PlanningAutoselectCommitteeConfig:
 class PlanningConfig:
     provider: str
     enabled: bool = True
-    mode: str = "committee"
+    mode: str = "auto"
     test_plan_max_parallelism: int = 3
     cwd_source: str = "plan_workspace"
     max_turns: int = 4
@@ -171,7 +171,7 @@ class PlanningConfig:
         return cls(
             provider=provider,
             enabled=bool(data.get("enabled", True)),
-            mode=str(data.get("mode", "committee")).strip() or "committee",
+            mode=str(data.get("mode", "auto")).strip() or "auto",
             test_plan_max_parallelism=int(data.get("test_plan_max_parallelism", 3)),
             cwd_source=str(data.get("cwd_source", "plan_workspace")).strip() or "plan_workspace",
             max_turns=int(data.get("max_turns", 4)),
