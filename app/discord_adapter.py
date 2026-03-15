@@ -285,7 +285,6 @@ class DevBotClient(DiscordClientBase):
             ("plan", "repo を読んで plan.json と test_plan.json を作成します", self.plan_command, True),
             ("approve-plan", "計画を承認して Issue 化と実装開始を行います", self.approve_plan_command, False),
             ("reject-plan", "計画を却下して修正要求状態に戻します", self.reject_plan_command, False),
-            ("confirm", "互換コマンドです。/plan と同じく計画を作成します", self.confirm_command, True),
         ):
             command = cast(Any, app_commands.Command(name=name, description=description, callback=cast(Any, callback)))
             if needs_repo:
@@ -522,10 +521,7 @@ class DevBotClient(DiscordClientBase):
         await self._run_blocking(self.github_client.update_issue_state, repo_full_name, issue_number, state)
 
     async def plan_command(self, interaction: discord.Interaction, repo: str) -> None:
-        await self._generate_plan(interaction, repo, alias_used=False)
-
-    async def confirm_command(self, interaction: discord.Interaction, repo: str) -> None:
-        await self._generate_plan(interaction, repo, alias_used=True)
+        await self._generate_plan(interaction, repo)
 
     async def approve_plan_command(self, interaction: discord.Interaction) -> None:
         await self._promote_approved_plan(interaction)
@@ -1123,7 +1119,7 @@ class DevBotClient(DiscordClientBase):
         self.github_client.update_issue_state(repo_full_name, issue_number, state)
         self.github_client.upsert_workpad_comment(repo_full_name, issue_number, sections)
 
-    async def _generate_plan(self, interaction: discord.Interaction, repo: str, *, alias_used: bool) -> None:
+    async def _generate_plan(self, interaction: discord.Interaction, repo: str, *, alias_used: bool = False) -> None:
         thread_id = self._ensure_managed_thread(interaction.channel)
         if thread_id is None:
             await interaction.response.send_message(

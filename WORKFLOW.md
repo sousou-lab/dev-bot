@@ -246,7 +246,7 @@ telemetry:
 discord:
   enabled: true
   mode: planning_and_status_surface
-  bind_command: /issue bind
+  bind_command: /issue
   plan_command: /plan
   approve_plan_command: /approve-plan
   reject_plan_command: /reject-plan

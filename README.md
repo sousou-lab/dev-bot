@@ -102,10 +102,20 @@ python -m app.main
 
 | コマンド | 説明 |
 |---------|------|
-| `/plan <repo>` | 要件整理を開始し、計画を生成 |
-| `/approve-plan` | 計画を承認して実装可能状態にする |
-| `/reject-plan` | 計画を却下して修正を要求 |
-| `/abort` | 実行中のタスクを中止 |
+| `/plan repo:<owner/repo>` | 要件サマリーをもとに `plan.json` と `test_plan.json` を生成する |
+| `/approve-plan` | 計画を承認し、Issue 化と実装開始を行う |
+| `/reject-plan` | 計画を却下し、修正要求状態に戻す |
+| `/repos [query]` | アクセス可能な repository 一覧を表示する。`query` で絞り込み可能 |
+| `/status` | 現在のスレッドの plan / run / review / approval 状態を表示する |
+| `/issue` | 現在のスレッドに紐づく Issue を表示する |
+| `/pr` | 現在のスレッドに紐づく PR を表示する |
+| `/approve` | 保留中の高リスク操作を承認する |
+| `/reject` | 保留中の高リスク操作を拒否する |
+| `/abort` | 実行中のタスクを中止する |
+| `/revise` | 要件整理に戻し、派生成果物をクリアする |
+| `/diff [pathspec]` | 現在の作業差分を表示する。`pathspec` で対象パスを絞り込める |
+| `/why-failed` | 直近の失敗理由を要約表示する |
+| `/budget` | 直近 run の usage / cost 要約を表示する |
 
 ## Issue のライフサイクル
 

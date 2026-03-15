@@ -424,16 +424,15 @@ class GitHubIssueClient:
         return Github(auth=Token(self.installation_token()))
 
     def _require_client(self):
-        if self.client is None:
-            if self._token:
+        if self._token:
+            if self.client is None:
                 self.client = self._build_token_client(self._token)
-            elif self._app_id and self._private_key_path and self._installation_id:
-                self.client = self._build_installation_client()
-            else:
-                raise RuntimeError("GitHub client is not configured")
-        if self.client is None:
-            raise RuntimeError("GitHub client could not be initialized")
-        return self.client
+            if self.client is None:
+                raise RuntimeError("GitHub client could not be initialized")
+            return self.client
+        if self._app_id and self._private_key_path and self._installation_id:
+            return self._build_installation_client()
+        raise RuntimeError("GitHub client is not configured")
 
     def _get_repo(self, repo_full_name: str):
         try:

@@ -4,28 +4,31 @@
   "retry_recommended": false,
   "human_check_recommended": false,
   "unit": "pass",
-  "integration": "pass",
+  "integration": "not_run",
   "lint": "pass",
-  "typecheck": "pass",
+  "typecheck": "not_run",
   "manual_checks": [
     {
-      "name": "保護パスへの今回の編集有無を確認する",
+      "name": "GitHub App token refresh behavior review",
       "status": "pass",
-      "details": "This pass edited runtime files plus WORKFLOW.md to add the new compaction and artifact contract fields required by the implementation request."
+      "details": "GitHub App mode now rebuilds the PyGithub client on each call so expired installation tokens are not reused across long-lived bot sessions."
+    },
+    {
+      "name": "Discord command surface review",
+      "status": "pass",
+      "details": "Removed the duplicate `/confirm` slash command registration and aligned command documentation with the commands actually exposed by discord_adapter."
     }
   ],
   "notes": [
-    "PASS: uv run ruff format --check app/ tests/",
-    "PASS: uv run ruff check .",
-    "PASS: uv run pyright app",
-    "PASS: uv run python -m pytest tests/test_verification_profiles.py tests/test_workflow_schema.py tests/test_pipeline.py tests/test_pipeline_e2e.py -q",
-    "PASS: uv run python -m pytest tests/test_codex_app_server_backend.py tests/test_codex_runner.py tests/test_pipeline.py tests/test_pipeline_e2e.py -q",
-    "PASS: uv run python -m pytest tests -q",
-    "Full repository pytest passed with 362 tests in 13.50s.",
-    "Candidate mode trigger thresholds are now read from WORKFLOW config instead of hard-coded runtime defaults.",
-    "Codex run specs now propagate allow_thread_resume_same_run_only from workflow-driven pipeline decisions.",
-    "Verification planning now emits repair profiles and repair checks for python, TypeScript, and mixed repositories.",
-    "Pipeline now persists repair_feedback.json/jsonl, review_decision.json, and postable_findings.json, and proof-of-work requires them.",
-    "Codex app-server backend now supports thread/read and session rollover persists a session snapshot into session_checkpoint.json and session_handoff_bundle.json."
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run ruff check app/github_client.py tests/test_github_client.py",
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run ruff format --check app/github_client.py tests/test_github_client.py",
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_github_client.py -v --tb=short",
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run ruff check app/discord_adapter.py",
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run ruff format --check app/discord_adapter.py",
+    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_discord_scheduler.py -q --tb=short",
+    "22 tests passed.",
+    "49 discord scheduler tests passed.",
+    "Markdown formatting was updated manually in README.md and WORKFLOW.md; Ruff markdown formatting was not used because preview mode is disabled in this environment.",
+    "Did not run integration tests, typecheck, or full repository test suite for this targeted fix."
   ]
 }

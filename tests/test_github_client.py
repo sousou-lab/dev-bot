@@ -63,6 +63,33 @@ class GitHubIssueClientTests(unittest.TestCase):
         expected = base64.b64encode(b"x-access-token:token-123").decode("ascii")
         self.assertEqual(f"AUTHORIZATION: basic {expected}", env["GIT_CONFIG_VALUE_0"])
 
+    def test_require_client_caches_pat_client(self) -> None:
+        client = GitHubIssueClient("token-123")
+        token_client = Mock()
+
+        with patch.object(client, "_build_token_client", return_value=token_client) as build_mock:
+            first = client._require_client()
+            second = client._require_client()
+
+        self.assertIs(first, token_client)
+        self.assertIs(second, token_client)
+        build_mock.assert_called_once_with("token-123")
+
+    def test_require_client_rebuilds_github_app_client_each_call(self) -> None:
+        client = GitHubIssueClient(app_id="1", private_key_path="/tmp/key.pem", installation_id="2")
+        first_client = Mock()
+        second_client = Mock()
+
+        with patch.object(
+            client, "_build_installation_client", side_effect=[first_client, second_client]
+        ) as build_mock:
+            first = client._require_client()
+            second = client._require_client()
+
+        self.assertIs(first, first_client)
+        self.assertIs(second, second_client)
+        self.assertEqual(2, build_mock.call_count)
+
     def test_render_workpad_includes_marker_and_sections(self) -> None:
         body = render_workpad(
             "owner/repo",
