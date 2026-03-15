@@ -98,7 +98,7 @@ class CodexAppServerBackend(ExecutionBackend):
                 "model": spec.model,
                 "cwd": spec.cwd,
                 "approvalPolicy": "never",
-                "sandbox": "workspaceWrite",
+                "sandbox": "workspace-write",
                 "serviceName": spec.service_name,
             },
             request_id=2,
@@ -117,7 +117,7 @@ class CodexAppServerBackend(ExecutionBackend):
                 "effort": "medium",
                 "summary": "concise",
                 "sandboxPolicy": {
-                    "type": "workspaceWrite",
+                    "type": "workspace-write",
                     "writableRoots": spec.writable_roots or [spec.cwd],
                     "readOnlyAccess": {
                         "type": "restricted",
@@ -146,7 +146,7 @@ class CodexAppServerBackend(ExecutionBackend):
                 "effort": "medium",
                 "summary": "concise",
                 "sandboxPolicy": {
-                    "type": "workspaceWrite",
+                    "type": "workspace-write",
                     "writableRoots": spec.writable_roots or [spec.cwd],
                     "readOnlyAccess": {
                         "type": "restricted",

@@ -43,7 +43,7 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
         typecheck_commands.append("uv run --with pyright pyright .")
         format_commands.append("uv run --with ruff ruff format --check .")
         if any(Path(path).name.startswith("test_") or "/tests/" in f"/{path}" for path in files):
-            test_commands.append("uv run --with pytest pytest -q")
+            test_commands.append("uv run python -m pytest -q")
     if pyproject.exists() or requirements.exists():
         if requirements.exists():
             setup_commands.append("uv pip install -r requirements.txt")

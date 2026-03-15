@@ -195,3 +195,53 @@ class CodexAppServerBackendTests(unittest.TestCase):
             self.assertEqual(["initialize", "initialized", "thread/compact/start"], calls)
 
         asyncio.run(run_test())
+
+    def test_start_run_uses_workspace_write_sandbox_values(self) -> None:
+        backend = CodexAppServerBackend()
+
+        async def run_test() -> None:
+            calls: list[str] = []
+            fake_proc = type("Proc", (), {"pid": 123, "stdout": None, "stdin": None})()
+
+            async def fake_request(
+                method: str, params: dict[str, object], request_id: int | None = None
+            ) -> dict[str, object]:
+                del request_id
+                calls.append(method)
+                if method == "initialize":
+                    return {"result": {}}
+                if method == "thread/start":
+                    self.assertEqual("workspace-write", params["sandbox"])
+                    return {"result": {"thread": {"id": "thread_1"}}}
+                if method == "turn/start":
+                    sandbox_policy = params["sandboxPolicy"]
+                    assert isinstance(sandbox_policy, dict)
+                    self.assertEqual("workspace-write", sandbox_policy["type"])
+                    return {"result": {"turn": {"id": "turn_1"}}}
+                raise AssertionError(method)
+
+            async def fake_notify(method: str, params: dict[str, object]) -> None:
+                del params
+                calls.append(method)
+
+            async def fake_reader_loop() -> None:
+                return None
+
+            with patch("app.runners.codex_app_server_backend.asyncio.create_subprocess_shell", return_value=fake_proc):
+                backend._request = fake_request  # type: ignore[method-assign]
+                backend._notify = fake_notify  # type: ignore[method-assign]
+                backend._reader_loop = fake_reader_loop  # type: ignore[method-assign]
+                handle = await backend.start_run(
+                    RunSpec(
+                        run_id="run-1",
+                        issue_key="owner/repo#1",
+                        candidate_id="primary",
+                        cwd="/tmp/work",
+                        prompt="implement",
+                    )
+                )
+            self.assertEqual("thread_1", handle.thread_id)
+            self.assertEqual("turn_1", handle.turn_id)
+            self.assertEqual(["initialize", "initialized", "thread/start", "turn/start"], calls)
+
+        asyncio.run(run_test())

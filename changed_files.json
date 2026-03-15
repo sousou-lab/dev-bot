@@ -1,12 +1,13 @@
 {
   "changed_files": [
-    "app/discord_adapter.py",
-    "app/planning_agent.py",
+    "WORKFLOW.md",
+    "app/pipeline.py",
     "app/repo_profiler.py",
+    "app/runners/codex_app_server_backend.py",
     "changed_files.json",
     "final_summary.json",
-    "tests/test_discord_scheduler.py",
-    "tests/test_planning_agent.py",
+    "tests/test_codex_app_server_backend.py",
+    "tests/test_pipeline.py",
     "tests/test_verification_profiles.py",
     "verification.json"
   ]
