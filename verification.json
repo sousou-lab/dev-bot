@@ -5,30 +5,13 @@
   "human_check_recommended": false,
   "unit": "pass",
   "integration": "not_run",
-  "lint": "pass",
+  "lint": "not_run",
   "typecheck": "not_run",
-  "manual_checks": [
-    {
-      "name": "GitHub App token refresh behavior review",
-      "status": "pass",
-      "details": "GitHub App mode now rebuilds the PyGithub client on each call so expired installation tokens are not reused across long-lived bot sessions."
-    },
-    {
-      "name": "Discord command surface review",
-      "status": "pass",
-      "details": "Removed the duplicate `/confirm` slash command registration and aligned command documentation with the commands actually exposed by discord_adapter."
-    }
-  ],
+  "manual_checks": [],
   "notes": [
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run ruff check app/github_client.py tests/test_github_client.py",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run ruff format --check app/github_client.py tests/test_github_client.py",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_github_client.py -v --tb=short",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run ruff check app/discord_adapter.py",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run ruff format --check app/discord_adapter.py",
-    "PASS: UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_discord_scheduler.py -q --tb=short",
-    "22 tests passed.",
-    "49 discord scheduler tests passed.",
-    "Markdown formatting was updated manually in README.md and WORKFLOW.md; Ruff markdown formatting was not used because preview mode is disabled in this environment.",
-    "Did not run integration tests, typecheck, or full repository test suite for this targeted fix."
+    "PASS: uv run python -m pytest tests/test_verification_profiles.py tests/test_discord_scheduler.py -q",
+    "PASS: uv run python -m pytest tests/test_planning_agent.py -q -k 'full_repo_file_count_threshold or legacy_test_plan_parallel_failure_falls_back_to_sequential'",
+    "Stabilized tests/test_planning_agent.py::PlanningAgentCommitteeTests::test_legacy_test_plan_parallel_failure_falls_back_to_sequential by asserting fallback semantics instead of scheduler-dependent call counts.",
+    "Did not run lint, typecheck, integration tests, or the full repository test suite for this targeted fix."
   ]
 }

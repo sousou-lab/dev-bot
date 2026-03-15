@@ -1,12 +1,13 @@
 {
   "changed_files": [
-    "README.md",
-    "WORKFLOW.md",
     "app/discord_adapter.py",
-    "app/github_client.py",
+    "app/planning_agent.py",
+    "app/repo_profiler.py",
     "changed_files.json",
     "final_summary.json",
-    "tests/test_github_client.py",
+    "tests/test_discord_scheduler.py",
+    "tests/test_planning_agent.py",
+    "tests/test_verification_profiles.py",
     "verification.json"
   ]
 }

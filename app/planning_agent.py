@@ -718,7 +718,9 @@ class PlanningAgent:
         )
         complexity = str(summary.get("complexity", "")).strip().lower()
         summary_chars = len(json.dumps(summary, ensure_ascii=False))
-        repo_files = len([str(item).strip() for item in repo_profile.get("files", []) if str(item).strip()])
+        repo_files = int(repo_profile.get("file_count", 0) or 0)
+        if repo_files <= 0:
+            repo_files = len([str(item).strip() for item in repo_profile.get("files", []) if str(item).strip()])
 
         if acceptance_count >= autoselect.min_acceptance_criteria:
             return True

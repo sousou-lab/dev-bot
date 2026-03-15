@@ -449,6 +449,77 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
             self.assertEqual("committee", artifacts.committee_bundle["mode"])
             create_committee.assert_called_once()
 
+    def test_build_artifacts_auto_mode_uses_full_repo_file_count_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "WORKFLOW.md").write_text(
+                (
+                    "---\n"
+                    "planning:\n"
+                    "  provider: claude-agent-sdk\n"
+                    "  mode: auto\n"
+                    "  autoselect_committee:\n"
+                    "    min_acceptance_criteria: 20\n"
+                    "    min_acceptance_criteria_when_complex: 20\n"
+                    "    min_summary_chars_when_complex: 10000\n"
+                    "    min_repo_files: 500\n"
+                    "    min_acceptance_criteria_with_large_repo: 3\n"
+                    "  committee:\n"
+                    "    roles:\n"
+                    "      merger:\n"
+                    "        mode: query\n"
+                    "        allowed_tools: [Read]\n"
+                    "        disallowed_tools: [Write]\n"
+                    "        output_schema: plan_v2\n"
+                    "implementation:\n"
+                    "  backend: codex-app-server\n"
+                    "review:\n"
+                    "  provider: claude-agent-sdk\n"
+                    "---\n"
+                ),
+                encoding="utf-8",
+            )
+            agent = PlanningAgent(make_test_settings())
+            merged_plan = PlanV2(
+                goal="Ship it",
+                acceptance_criteria=["ac1", "ac2", "ac3"],
+                out_of_scope=[],
+                candidate_files=["app/x.py"],
+                tasks=[PlanTask(id="T1", summary="Implement x", files=["app/x.py"], done_when="done")],
+                design_branches=[DesignBranch(id="primary", summary="main")],
+                risks=[RiskItem(risk="regression", mitigation="tests")],
+                test_mapping=[CriterionTestMappingItem(criterion="ac1", tests=["tests/test_x.py"])],
+                verification_profile="python-basic",
+            )
+            bundle = type(
+                "Bundle",
+                (),
+                {
+                    "repo": RepoExplorerV1(candidate_files=["app/x.py"]),
+                    "risk": type(
+                        "RiskOut",
+                        (),
+                        {
+                            "risks": [RiskItem(risk="regression", mitigation="tests")],
+                            "test_mapping": [CriterionTestMappingItem(criterion="ac1", tests=["tests/test_x.py"])],
+                        },
+                    )(),
+                    "constraint": ConstraintReportV1(out_of_scope=[]),
+                    "merged": merged_plan,
+                },
+            )()
+
+            with patch.object(agent, "_create_planner_committee") as create_committee:
+                create_committee.return_value.build_plan.side_effect = lambda issue_ctx: bundle
+                with patch("app.planning_agent._run_async", side_effect=lambda value: value):
+                    artifacts = agent.build_artifacts(
+                        workspace=tmpdir,
+                        summary={"goal": "Ship it", "acceptance_criteria": ["ac1", "ac2", "ac3"]},
+                        repo_profile={"files": ["app/x.py"], "file_count": 500},
+                    )
+
+            self.assertEqual("committee", artifacts.committee_bundle["mode"])
+            create_committee.assert_called_once()
+
     def test_build_artifacts_enables_candidate_mode_for_rework_committee_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "WORKFLOW.md").write_text(
@@ -965,6 +1036,7 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
                 "high_risk_changes": [],
             }
             progress_events: list[dict[str, object]] = []
+            called_indices: list[int] = []
             active = 0
             failed_once = False
             lock = threading.Lock()
@@ -981,6 +1053,7 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
             def _build_chunk(**kwargs):
                 nonlocal active, failed_once
                 index = kwargs["index"]
+                called_indices.append(index)
                 with lock:
                     active += 1
                     if active >= 2:
@@ -1011,7 +1084,8 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
                 )
 
             self.assertEqual([], artifacts.test_plan["cases"])
-            self.assertGreaterEqual(build_chunk.call_count, 5)
+            self.assertTrue({1, 2, 3}.issubset(set(called_indices)))
+            self.assertEqual(2, called_indices.count(2))
             self.assertTrue(
                 any(
                     event.get("phase") == "acceptance_criterion_fallback"

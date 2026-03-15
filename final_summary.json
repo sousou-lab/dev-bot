@@ -3,14 +3,10 @@
   "state": "Human Review",
   "failure_type": "",
   "summary": [
-    "GitHubIssueClient no longer reuses a stale PyGithub client when running in GitHub App mode.",
-    "PAT mode still caches a single client instance to preserve existing behavior.",
-    "Added tests that lock the caching behavior for PAT auth and per-call rebuild behavior for GitHub App auth.",
-    "Removed the duplicate `/confirm` slash command while keeping internal `_generate_plan(..., alias_used=...)` compatibility for existing tests and internal callers.",
-    "Updated README command documentation and aligned `WORKFLOW.md` bind command text with the implemented `/issue` command.",
-    "Targeted verification passed with Ruff checks plus `tests/test_github_client.py` and `tests/test_discord_scheduler.py`."
+    "Repo profiling now records the full repository file count separately from the sampled file list.",
+    "Auto committee selection now uses the full file count, so min_repo_files thresholds above 200 work as intended.",
+    "Planning progress now advances into acceptance_criterion_fallback even when current resets to 0 during sequential fallback.",
+    "Added regression tests for sampled-vs-full file counts, auto-mode large-repo selection, fallback progress persistence, and stabilized the existing parallel fallback test."
   ],
-  "risks": [
-    "This change increases GitHub App client construction frequency; if needed, a later optimization can cache by token expiry instead of per call."
-  ]
+  "risks": []
 }

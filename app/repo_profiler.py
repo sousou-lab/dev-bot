@@ -103,6 +103,7 @@ def build_repo_profile(workspace: str) -> dict[str, Any]:
         ),
         "migration": migration,
         "readme_files": readme_candidates[:5],
+        "file_count": len(files),
         "files": sample_files,
         "repo_config_loaded": bool(repo_config),
     }

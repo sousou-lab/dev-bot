@@ -1492,6 +1492,13 @@ class DevBotClient(DiscordClientBase):
             tracked_keys = {"phase", "current", "acceptance_criterion", "message", "last_event_kind", "last_event_at"}
             if not tracked_keys.intersection(payload):
                 return False
+            payload_phase = str(payload.get("phase", "")).strip()
+            current_phase = str(current_state.get("phase", "")).strip()
+            if (
+                payload_phase == "acceptance_criterion_fallback"
+                and phase_rank.get(payload_phase, 0) > phase_rank.get(current_phase, 0)
+            ):
+                return True
             return progress_order(payload) >= progress_order(current_state)
 
         def report_progress(payload: dict[str, Any]) -> None:
