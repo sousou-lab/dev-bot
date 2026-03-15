@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -820,6 +822,93 @@ class PlanningAgentCommitteeTests(unittest.TestCase):
             self.assertIn("test_plan_seed", overview_prompt)
             self.assertIn("overview:", chunk_prompt)
             self.assertNotIn('"app/file_99.py"', chunk_prompt)
+
+    def test_test_plan_parallelism_defaults_to_three(self) -> None:
+        agent = PlanningAgent(make_test_settings())
+
+        self.assertEqual(1, agent._test_plan_parallelism(planning_config=None, acceptance_count=1))
+        self.assertEqual(3, agent._test_plan_parallelism(planning_config=None, acceptance_count=10))
+
+    def test_legacy_test_plan_parallelizes_chunks_up_to_workflow_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "WORKFLOW.md").write_text(
+                (
+                    "---\n"
+                    "planning:\n"
+                    "  provider: claude-agent-sdk\n"
+                    "  mode: legacy\n"
+                    "  test_plan_max_parallelism: 2\n"
+                    "implementation:\n"
+                    "  backend: codex-app-server\n"
+                    "review:\n"
+                    "  provider: claude-agent-sdk\n"
+                    "---\n"
+                ),
+                encoding="utf-8",
+            )
+            agent = PlanningAgent(make_test_settings())
+            plan_client = Mock()
+            plan_client.json_response.return_value = {
+                "version": 2,
+                "goal": "Ship it",
+                "scope": ["Implement x"],
+                "assumptions": [],
+                "candidate_files": ["app/x.py"],
+                "must_not_touch": ["WORKFLOW.md"],
+                "verification_focus": ["keep tests green"],
+                "exploration_required": False,
+                "implementation_steps": ["Implement x"],
+                "verification_steps": ["Run tests"],
+                "risks": [],
+                "high_risk_changes": [],
+            }
+
+            class _TrackingClient:
+                def __init__(self, *args, **kwargs) -> None:
+                    self.active = 0
+                    self.max_active = 0
+                    self.lock = threading.Lock()
+                    self.ready = threading.Event()
+                    self.chunk_calls = 0
+
+                def json_response_with_meta(self, *args, **kwargs):
+                    schema = kwargs["output_schema"]
+                    if "cases" not in schema["required"]:
+                        return Mock(
+                            payload={
+                                "test_targets": ["tests/test_x.py"],
+                                "strategy": {"unit": [], "integration": [], "e2e": [], "mocking": []},
+                            },
+                            session_id="overview-session",
+                        )
+                    with self.lock:
+                        self.active += 1
+                        self.chunk_calls += 1
+                        self.max_active = max(self.max_active, self.active)
+                        if self.active >= 2:
+                            self.ready.set()
+                    self.ready.wait(timeout=1.0)
+                    time.sleep(0.02)
+                    with self.lock:
+                        self.active -= 1
+                    phase_index = kwargs["debug_context"]["phase_index"]
+                    return Mock(
+                        payload={"cases": [], "regression_risks": [], "risks": []},
+                        session_id=f"chunk-{phase_index}",
+                    )
+
+            test_plan_client = _TrackingClient()
+
+            with patch("app.planning_agent.ClaudeAgentClient", side_effect=[plan_client, test_plan_client]):
+                artifacts = agent.build_artifacts(
+                    workspace=tmpdir,
+                    summary={"goal": "Ship it", "acceptance_criteria": ["ac1", "ac2", "ac3"]},
+                    repo_profile={"files": ["app/x.py"]},
+                )
+
+            self.assertEqual(["tests/test_x.py"], artifacts.test_plan["test_targets"])
+            self.assertEqual(3, test_plan_client.chunk_calls)
+            self.assertEqual(2, test_plan_client.max_active)
 
     def test_committee_failure_falls_back_to_legacy_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -11,6 +11,7 @@ class WorkflowSchemaTests(unittest.TestCase):
             {
                 "planning": {
                     "provider": "claude-agent-sdk",
+                    "test_plan_max_parallelism": 4,
                     "cwd_source": "plan_workspace",
                     "max_turns": 4,
                     "timeout_seconds": 300,
@@ -116,6 +117,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         assert config.evals is not None
         assert config.telemetry is not None
         self.assertEqual("query", config.planning.committee.roles["merger"].mode)
+        self.assertEqual(4, config.planning.test_plan_max_parallelism)
         self.assertEqual(["project"], config.planning.settings_sources)
         self.assertTrue(config.planning.legacy_fallback.enabled)
         self.assertTrue(config.planning.legacy_fallback.use_only_on_committee_failure)

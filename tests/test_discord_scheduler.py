@@ -438,7 +438,8 @@ class DiscordSchedulerAsyncTests(unittest.IsolatedAsyncioTestCase):
             with patch("app.agent_sdk_client._resolve_claude_cli", return_value="/tmp/claude"):
                 with patch("app.agent_sdk_client._claude_version", return_value="1.0.0"):
                     with patch("app.agent_sdk_client._claude_preflight", return_value={"ok": True}):
-                        await self.client._generate_plan(interaction, "fixture/repo", alias_used=False)
+                        with patch.object(self.client.planning_agent, "_test_plan_parallelism", return_value=1):
+                            await self.client._generate_plan(interaction, "fixture/repo", alias_used=False)
 
         failure = self.state_store.load_artifact(thread_id, "last_failure.json")
         self.assertEqual("test_plan", failure["details"]["prompt_kind"])

@@ -102,6 +102,7 @@ planning:
   provider: claude-agent-sdk
   enabled: true
   mode: committee
+  test_plan_max_parallelism: 3
   # `mode: auto` を使うと、要件規模に応じて committee / legacy を自動選択する。
   # autoselect_committee:
   #   min_acceptance_criteria: 12

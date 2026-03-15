@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -573,6 +574,106 @@ class PlanningAgent:
             return list(planning_config.settings_sources)
         return ["project"]
 
+    def _test_plan_parallelism(
+        self,
+        *,
+        planning_config: PlanningConfig | None,
+        acceptance_count: int,
+    ) -> int:
+        if acceptance_count <= 1:
+            return 1
+        max_parallel = int(getattr(planning_config, "test_plan_max_parallelism", 3) or 3)
+        return max(1, min(acceptance_count, max_parallel))
+
+    def _build_test_plan_chunk(
+        self,
+        *,
+        client: ClaudeAgentClient,
+        workspace: str,
+        seed_context: str,
+        overview: dict[str, Any],
+        acceptance: str,
+        index: int,
+        total: int,
+        planning_config: PlanningConfig | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        debug_recorder: Callable[[dict[str, Any]], None] | None,
+        overview_session_id: str | None,
+    ) -> dict[str, Any]:
+        chunk_started_at_dt = datetime.now(UTC)
+        chunk_started_at = _format_progress_timestamp(chunk_started_at_dt)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "status": "test_plan_generating",
+                    "phase": "acceptance_criterion",
+                    "current": index,
+                    "total": total,
+                    "acceptance_criterion": acceptance,
+                    "message": f"test_plan chunk {index}/{total} を生成中",
+                    "started_at": chunk_started_at,
+                    "last_event_at": chunk_started_at,
+                    "elapsed_ms": 0,
+                    "last_event_kind": "started",
+                }
+            )
+        chunk_prompt = (
+            f"{seed_context}\n\n"
+            f"overview:\n{json.dumps(overview, ensure_ascii=False, indent=2)}\n\n"
+            f"対象の acceptance criterion ({index}/{total}): {acceptance}\n\n"
+            "この acceptance criterion に対応する cases / regression_risks / risks のみを返してください。"
+            " cases はこの acceptance criterion を必ず参照し、他の acceptance criterion のケースは混ぜないでください。"
+            " overview で確定した test_targets / strategy と矛盾しない内容にしてください。"
+        )
+        partial_result = client.json_response_with_meta(
+            TEST_PLAN_SYSTEM_PROMPT,
+            chunk_prompt,
+            cwd=workspace,
+            max_turns=4,
+            allowed_tools=READ_ONLY_TOOLS,
+            permission_mode="default",
+            setting_sources=self._planning_setting_sources(planning_config),
+            output_schema=TEST_PLAN_AC_SCHEMA,
+            prompt_kind="test_plan",
+            debug_recorder=debug_recorder,
+            debug_context={
+                "phase": "acceptance_criterion",
+                "phase_index": index,
+                "phase_label": acceptance,
+            },
+            resume_session_id=overview_session_id,
+            continue_conversation=bool(overview_session_id),
+            fork_session=bool(overview_session_id),
+            include_partial_messages=True,
+            event_callback=_make_test_plan_progress_event_callback(
+                progress_callback,
+                status="test_plan_generating",
+                phase="acceptance_criterion",
+                current=index,
+                total=total,
+                message=f"test_plan chunk {index}/{total} を生成中",
+                started_at=chunk_started_at_dt,
+                acceptance_criterion=acceptance,
+            ),
+        )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "status": "test_plan_generating",
+                    "phase": "acceptance_criterion_completed",
+                    "current": index,
+                    "total": total,
+                    "acceptance_criterion": acceptance,
+                    "message": f"test_plan chunk {index}/{total} 完了",
+                    "started_at": chunk_started_at,
+                    "last_event_at": _format_progress_timestamp(),
+                    "elapsed_ms": _elapsed_ms(chunk_started_at_dt),
+                    "last_event_kind": "completed",
+                    "session_id": partial_result.session_id or "",
+                }
+            )
+        return partial_result.payload
+
     def _select_planning_mode(
         self,
         *,
@@ -895,81 +996,64 @@ class PlanningAgent:
                 }
             )
 
-        case_chunks: list[dict[str, Any]] = []
-        for index, acceptance in enumerate(acceptance_items, start=1):
-            chunk_started_at_dt = datetime.now(UTC)
-            chunk_started_at = _format_progress_timestamp(chunk_started_at_dt)
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "status": "test_plan_generating",
-                        "phase": "acceptance_criterion",
-                        "current": index,
-                        "total": len(acceptance_items),
-                        "acceptance_criterion": acceptance,
-                        "message": f"test_plan chunk {index}/{len(acceptance_items)} を生成中",
-                        "started_at": chunk_started_at,
-                        "last_event_at": chunk_started_at,
-                        "elapsed_ms": 0,
-                        "last_event_kind": "started",
-                    }
-                )
-            chunk_prompt = (
-                f"{seed_context}\n\n"
-                f"overview:\n{json.dumps(overview, ensure_ascii=False, indent=2)}\n\n"
-                f"対象の acceptance criterion ({index}/{len(acceptance_items)}): {acceptance}\n\n"
-                "この acceptance criterion に対応する cases / regression_risks / risks のみを返してください。"
-                " cases はこの acceptance criterion を必ず参照し、他の acceptance criterion のケースは混ぜないでください。"
-                " overview で確定した test_targets / strategy と矛盾しない内容にしてください。"
+        parallelism = self._test_plan_parallelism(
+            planning_config=planning_config,
+            acceptance_count=len(acceptance_items),
+        )
+        if progress_callback is not None and parallelism > 1:
+            progress_callback(
+                {
+                    "status": "test_plan_generating",
+                    "phase": "acceptance_criterion_dispatch",
+                    "current": 0,
+                    "total": len(acceptance_items),
+                    "message": f"test_plan chunk を並列生成中 (max_parallel={parallelism})",
+                    "last_event_at": _format_progress_timestamp(),
+                    "last_event_kind": "dispatch",
+                    "parallelism": parallelism,
+                }
             )
-            partial_result = client.json_response_with_meta(
-                TEST_PLAN_SYSTEM_PROMPT,
-                chunk_prompt,
-                cwd=workspace,
-                max_turns=4,
-                allowed_tools=READ_ONLY_TOOLS,
-                permission_mode="default",
-                setting_sources=self._planning_setting_sources(planning_config),
-                output_schema=TEST_PLAN_AC_SCHEMA,
-                prompt_kind="test_plan",
-                debug_recorder=debug_recorder,
-                debug_context={
-                    "phase": "acceptance_criterion",
-                    "phase_index": index,
-                    "phase_label": acceptance,
-                },
-                resume_session_id=overview_result.session_id,
-                continue_conversation=bool(overview_result.session_id),
-                fork_session=bool(overview_result.session_id),
-                include_partial_messages=True,
-                event_callback=_make_test_plan_progress_event_callback(
-                    progress_callback,
-                    status="test_plan_generating",
-                    phase="acceptance_criterion",
-                    current=index,
+
+        if parallelism == 1:
+            case_chunks = [
+                self._build_test_plan_chunk(
+                    client=client,
+                    workspace=workspace,
+                    seed_context=seed_context,
+                    overview=overview,
+                    acceptance=acceptance,
+                    index=index,
                     total=len(acceptance_items),
-                    message=f"test_plan chunk {index}/{len(acceptance_items)} を生成中",
-                    started_at=chunk_started_at_dt,
-                    acceptance_criterion=acceptance,
-                ),
-            )
-            case_chunks.append(partial_result.payload)
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "status": "test_plan_generating",
-                        "phase": "acceptance_criterion_completed",
-                        "current": index,
-                        "total": len(acceptance_items),
-                        "acceptance_criterion": acceptance,
-                        "message": f"test_plan chunk {index}/{len(acceptance_items)} 完了",
-                        "started_at": chunk_started_at,
-                        "last_event_at": _format_progress_timestamp(),
-                        "elapsed_ms": _elapsed_ms(chunk_started_at_dt),
-                        "last_event_kind": "completed",
-                        "session_id": partial_result.session_id or "",
-                    }
+                    planning_config=planning_config,
+                    progress_callback=progress_callback,
+                    debug_recorder=debug_recorder,
+                    overview_session_id=overview_result.session_id,
                 )
+                for index, acceptance in enumerate(acceptance_items, start=1)
+            ]
+        else:
+            chunks_by_index: dict[int, dict[str, Any]] = {}
+            with ThreadPoolExecutor(max_workers=parallelism) as executor:
+                future_to_index = {
+                    executor.submit(
+                        self._build_test_plan_chunk,
+                        client=client,
+                        workspace=workspace,
+                        seed_context=seed_context,
+                        overview=overview,
+                        acceptance=acceptance,
+                        index=index,
+                        total=len(acceptance_items),
+                        planning_config=planning_config,
+                        progress_callback=progress_callback,
+                        debug_recorder=debug_recorder,
+                        overview_session_id=overview_result.session_id,
+                    ): index
+                    for index, acceptance in enumerate(acceptance_items, start=1)
+                }
+                for future in as_completed(future_to_index):
+                    chunks_by_index[future_to_index[future]] = future.result()
+            case_chunks = [chunks_by_index[index] for index in range(1, len(acceptance_items) + 1)]
 
         return _merge_test_plan_chunks(overview, case_chunks)
 
