@@ -30,9 +30,11 @@ class StubClaudeAgentClient(ClaudeAgentClient):
         super().__init__(api_key="dummy")
         self._responses = responses
         self.prompts: list[str] = []
+        self.run_kwargs: list[dict[str, object]] = []
 
     def run_text(self, *args, **kwargs):  # type: ignore[override]
         self.prompts.append(str(kwargs.get("prompt", "")))
+        self.run_kwargs.append(dict(kwargs))
         return self._responses.pop(0)
 
 
@@ -303,6 +305,68 @@ class ClaudeAgentClientTests(unittest.TestCase):
                         )
 
         self.assertEqual(5 * 1024 * 1024, options.kwargs["max_buffer_size"])
+
+    def test_build_options_sets_session_reuse_flags(self) -> None:
+        fake_module = types.ModuleType("claude_agent_sdk")
+
+        class FakeOptions:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        fake_module.ClaudeAgentOptions = FakeOptions
+
+        with patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            with patch("app.agent_sdk_client._resolve_claude_cli", return_value="/tmp/claude"):
+                with patch("app.agent_sdk_client._claude_version", return_value="1.0.0"):
+                    with patch("app.agent_sdk_client._claude_preflight", return_value={"ok": True}):
+                        options, _ = _build_options(
+                            api_key="dummy",
+                            system="system",
+                            cwd="/tmp/workspace",
+                            max_turns=2,
+                            max_buffer_size=None,
+                            allowed_tools=["Read"],
+                            permission_mode="default",
+                            setting_sources=[],
+                            hooks=None,
+                            agents=None,
+                            output_schema={"type": "object"},
+                            resume_session_id="seed-session",
+                            continue_conversation=True,
+                            fork_session=True,
+                            include_partial_messages=True,
+                        )
+
+        self.assertEqual("seed-session", options.kwargs["resume"])
+        self.assertTrue(options.kwargs["continue_conversation"])
+        self.assertTrue(options.kwargs["fork_session"])
+        self.assertTrue(options.kwargs["include_partial_messages"])
+
+    def test_json_response_retry_reuses_first_attempt_session(self) -> None:
+        client = StubClaudeAgentClient(
+            [
+                AgentResult(result="not json", session_id="sess_a"),
+                AgentResult(result='{"goal":"ok"}', session_id="sess_b"),
+            ]
+        )
+
+        result = client.json_response_with_meta(
+            "system",
+            "prompt",
+            prompt_kind="plan",
+            resume_session_id="seed-session",
+            continue_conversation=True,
+            fork_session=True,
+            include_partial_messages=True,
+        )
+
+        self.assertEqual({"goal": "ok"}, result.payload)
+        self.assertEqual(2, len(client.run_kwargs))
+        self.assertEqual("seed-session", client.run_kwargs[0]["resume_session_id"])
+        self.assertTrue(client.run_kwargs[0]["fork_session"])
+        self.assertEqual("sess_a", client.run_kwargs[1]["resume_session_id"])
+        self.assertTrue(client.run_kwargs[1]["continue_conversation"])
+        self.assertFalse(client.run_kwargs[1]["fork_session"])
 
     def test_json_response_raises_context_overload_error_on_empty_response(self) -> None:
         client = StubClaudeAgentClient(

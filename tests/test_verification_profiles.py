@@ -66,6 +66,16 @@ class VerificationProfileTests(unittest.TestCase):
         self.assertIn("uv run --with pyright pyright .", profile["typecheck_commands"])
         self.assertIn("uv run --with pytest pytest -q", profile["test_commands"])
 
+    def test_repo_profiler_reports_full_file_count_while_sampling_file_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for index in range(205):
+                Path(tmpdir, f"file_{index:03d}.txt").write_text("x\n", encoding="utf-8")
+
+            profile = build_repo_profile(tmpdir)
+
+        self.assertEqual(205, profile["file_count"])
+        self.assertEqual(200, len(profile["files"]))
+
     def test_build_verification_plan_for_python_includes_fast_repair_profile(self) -> None:
         repo_profile = {
             "languages": ["python"],

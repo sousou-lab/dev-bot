@@ -194,6 +194,11 @@ class ClaudeAgentClient:
         prompt_kind: str | None = None,
         debug_recorder: Any | None = None,
         debug_context: dict[str, Any] | None = None,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+        fork_session: bool = False,
+        include_partial_messages: bool = False,
+        event_callback: Any | None = None,
     ) -> dict:
         return self.json_response_with_meta(
             system,
@@ -209,6 +214,11 @@ class ClaudeAgentClient:
             prompt_kind=prompt_kind,
             debug_recorder=debug_recorder,
             debug_context=debug_context,
+            resume_session_id=resume_session_id,
+            continue_conversation=continue_conversation,
+            fork_session=fork_session,
+            include_partial_messages=include_partial_messages,
+            event_callback=event_callback,
         ).payload
 
     def json_response_with_meta(
@@ -226,6 +236,11 @@ class ClaudeAgentClient:
         prompt_kind: str | None = None,
         debug_recorder: Any | None = None,
         debug_context: dict[str, Any] | None = None,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+        fork_session: bool = False,
+        include_partial_messages: bool = False,
+        event_callback: Any | None = None,
     ) -> AgentJsonEnvelope:
         result = self.run_text(
             system=system,
@@ -239,6 +254,11 @@ class ClaudeAgentClient:
             agents=agents,
             output_schema=output_schema or {"type": "object"},
             prompt_kind=prompt_kind,
+            resume_session_id=resume_session_id,
+            continue_conversation=continue_conversation,
+            fork_session=fork_session,
+            include_partial_messages=include_partial_messages,
+            event_callback=event_callback,
         )
         _record_debug_attempt(debug_recorder, result, prompt_kind=prompt_kind, attempt_index=0, context=debug_context)
         prefetched_stderr: list[str] = []
@@ -248,6 +268,10 @@ class ClaudeAgentClient:
             prompt_kind=prompt_kind, tool_name=forbidden_tool[0]
         ):
             prefetched_stderr = list(result.stderr or [])
+            retry_resume_session_id, retry_continue_conversation, retry_fork_session = _build_retry_session_options(
+                result_session_id=result.session_id,
+                resume_session_id=resume_session_id,
+            )
             result = self.run_text(
                 system=system,
                 prompt=_build_json_retry_prompt(
@@ -264,6 +288,11 @@ class ClaudeAgentClient:
                 agents=agents,
                 output_schema=output_schema or {"type": "object"},
                 prompt_kind=prompt_kind,
+                resume_session_id=retry_resume_session_id,
+                continue_conversation=retry_continue_conversation,
+                fork_session=retry_fork_session,
+                include_partial_messages=include_partial_messages,
+                event_callback=event_callback,
             )
             _record_debug_attempt(
                 debug_recorder, result, prompt_kind=prompt_kind, attempt_index=1, context=debug_context
@@ -280,6 +309,10 @@ class ClaudeAgentClient:
             )
         text = result.result.strip()
         if not text:
+            retry_resume_session_id, retry_continue_conversation, retry_fork_session = _build_retry_session_options(
+                result_session_id=result.session_id,
+                resume_session_id=resume_session_id,
+            )
             retry_result = self.run_text(
                 system=system,
                 prompt=_build_json_retry_prompt(prompt, prompt_kind=prompt_kind),
@@ -292,6 +325,11 @@ class ClaudeAgentClient:
                 agents=agents,
                 output_schema=None,
                 prompt_kind=prompt_kind,
+                resume_session_id=retry_resume_session_id,
+                continue_conversation=retry_continue_conversation,
+                fork_session=retry_fork_session,
+                include_partial_messages=include_partial_messages,
+                event_callback=event_callback,
             )
             _record_debug_attempt(
                 debug_recorder, retry_result, prompt_kind=prompt_kind, attempt_index=1, context=debug_context
@@ -360,6 +398,11 @@ class ClaudeAgentClient:
                 agents=agents,
                 output_schema=None,
                 prompt_kind=prompt_kind,
+                resume_session_id=_coerce_session_id(result.session_id) or resume_session_id,
+                continue_conversation=True,
+                fork_session=False,
+                include_partial_messages=include_partial_messages,
+                event_callback=event_callback,
             )
             _record_debug_attempt(
                 debug_recorder, retry_result, prompt_kind=prompt_kind, attempt_index=1, context=debug_context
@@ -479,6 +522,11 @@ class ClaudeAgentClient:
         agents: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
         prompt_kind: str | None = None,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+        fork_session: bool = False,
+        include_partial_messages: bool = False,
+        event_callback: Any | None = None,
     ) -> AgentResult:
         return _run_async(
             _query_text(
@@ -496,6 +544,11 @@ class ClaudeAgentClient:
                 agents,
                 output_schema,
                 prompt_kind,
+                resume_session_id,
+                continue_conversation,
+                fork_session,
+                include_partial_messages,
+                event_callback,
             )
         )
 
@@ -537,6 +590,11 @@ async def _query_text(
     agents: dict[str, Any] | None,
     output_schema: dict[str, Any] | None,
     prompt_kind: str | None,
+    resume_session_id: str | None,
+    continue_conversation: bool,
+    fork_session: bool,
+    include_partial_messages: bool,
+    event_callback: Any | None,
 ) -> AgentResult:
     try:
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, query
@@ -557,6 +615,10 @@ async def _query_text(
         hooks=hooks,
         agents=agents,
         output_schema=output_schema,
+        resume_session_id=resume_session_id,
+        continue_conversation=continue_conversation,
+        fork_session=fork_session,
+        include_partial_messages=include_partial_messages,
     )
 
     async def _collect_result() -> AgentResult:
@@ -565,6 +627,7 @@ async def _query_text(
         assistant_text_block_count = 0
         event_trace: list[str] = []
         async for message in query(prompt=prompt, options=options):
+            _emit_agent_event(event_callback, message)
             if isinstance(message, AssistantMessage):
                 event_trace.append("assistant")
                 for block in message.content:
@@ -949,6 +1012,10 @@ def _build_options(
     hooks: dict[str, list[Any]] | None,
     agents: dict[str, Any] | None,
     output_schema: dict[str, Any] | None,
+    resume_session_id: str | None = None,
+    continue_conversation: bool = False,
+    fork_session: bool = False,
+    include_partial_messages: bool = False,
 ) -> tuple[Any, list[str]]:
     from claude_agent_sdk import ClaudeAgentOptions
 
@@ -985,6 +1052,8 @@ def _build_options(
         cwd=cwd,
         max_turns=max_turns,
         permission_mode=cast(Any, permission_mode),
+        continue_conversation=continue_conversation,
+        resume=resume_session_id,
         setting_sources=cast(Any, setting_sources),
         output_format={"type": "json_schema", "schema": output_schema} if output_schema is not None else None,
         cli_path=cli_path,
@@ -993,9 +1062,39 @@ def _build_options(
         max_buffer_size=max_buffer_size,
         stderr=stderr_lines.append,
         hooks=cast(Any, hooks),
+        include_partial_messages=include_partial_messages,
+        fork_session=fork_session,
         agents=agents,
     )
     return options, stderr_lines
+
+
+def _build_retry_session_options(
+    *,
+    result_session_id: Any,
+    resume_session_id: str | None,
+) -> tuple[str | None, bool, bool]:
+    session_id = _coerce_session_id(result_session_id) or resume_session_id
+    if not session_id:
+        return None, False, False
+    return session_id, True, False
+
+
+def _emit_agent_event(event_callback: Any | None, message: Any) -> None:
+    if event_callback is None:
+        return
+    try:
+        event_callback(
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "event_kind": type(message).__name__,
+                "session_id": _coerce_session_id(getattr(message, "session_id", None)),
+                "is_error": bool(getattr(message, "is_error", False)),
+                "stop_reason": str(getattr(message, "stop_reason", "") or ""),
+            }
+        )
+    except Exception:
+        return
 
 
 async def _collect_client_json_response(client: Any) -> dict[str, Any]:
